@@ -1,0 +1,58 @@
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+infra/ibc/config.ini
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# IDE & editor
+.claude/settings.local.json
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Market data (large binary files — download via backtest CLI)
+backtest/data/raw/**/*.parquet
+backtest/data/raw/**/*_chunks/
+
+# Backtest output (regenerated per run)
+backtest/output/*.txt
+
+# Logs
+*.log
+logs/
+
+# Next.js dashboard
+infra/dashboard/.next/
+infra/dashboard/node_modules/
+infra/dashboard/.env.local
+
+# OS
+.DS_Store
+Thumbs.db
