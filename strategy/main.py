@@ -19,6 +19,7 @@ async def main() -> None:
     from shared.oms.services.factory import build_oms_service
     from shared.oms.risk.calculator import RiskCalculator
     from shared.services.bootstrap import bootstrap_database
+    from instrumentation.src.bootstrap import bootstrap_kit
 
     from .config import (
         STRATEGY_ID,
@@ -106,6 +107,16 @@ async def main() -> None:
     logger.info("OMS service started")
 
     # -------------------------------------------------------------------
+    # 7.5. Bootstrap instrumentation kit
+    # -------------------------------------------------------------------
+    kit = bootstrap_kit(
+        strategy_id=STRATEGY_ID,
+        symbols=list(SYMBOL_CONFIGS.keys()),
+    )
+    kit._ctx.start()
+    logger.info("Instrumentation kit initialized")
+
+    # -------------------------------------------------------------------
     # 8. Create and start ATRSS engine
     # -------------------------------------------------------------------
     engine = ATRSSEngine(
@@ -115,6 +126,7 @@ async def main() -> None:
         config=SYMBOL_CONFIGS,
         trade_recorder=trade_recorder,
         equity=equity,
+        kit=kit,
     )
     await engine.start()
 
@@ -149,6 +161,12 @@ async def main() -> None:
     await engine.stop()
     await oms.stop()
     await session.stop()
+
+    # Stop instrumentation kit
+    try:
+        kit._ctx.stop()
+    except Exception:
+        pass
 
     if bootstrap_ctx.has_db:
         from shared.services.bootstrap import shutdown_database

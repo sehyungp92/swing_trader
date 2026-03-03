@@ -69,6 +69,16 @@ class TradeEvent:
     # Strategy config snapshot
     strategy_params_at_entry: Optional[dict] = None
 
+    # Enriched instrumentation
+    signal_factors: List[dict] = field(default_factory=list)       # what factors contributed to entry
+    filter_decisions: List[dict] = field(default_factory=list)     # how close each filter was to blocking
+    sizing_inputs: Optional[dict] = None                           # what drove the size decision
+    portfolio_state_at_entry: Optional[dict] = None                # exposure, direction, correlated positions
+
+    # Post-exit price tracking (backfilled by PostExitTracker)
+    post_exit_1h_pct: Optional[float] = None
+    post_exit_4h_pct: Optional[float] = None
+
     # Execution quality
     expected_entry_price: Optional[float] = None
     entry_slippage_bps: Optional[float] = None
@@ -122,6 +132,10 @@ class TradeLogger:
         entry_latency_ms: Optional[int] = None,
         market_regime: str = "",
         bar_id: Optional[str] = None,
+        signal_factors: Optional[List[dict]] = None,
+        filter_decisions: Optional[List[dict]] = None,
+        sizing_inputs: Optional[dict] = None,
+        portfolio_state_at_entry: Optional[dict] = None,
     ) -> TradeEvent:
         """Call immediately after a trade entry is confirmed (fill received)."""
         try:
@@ -166,6 +180,10 @@ class TradeLogger:
                 funding_rate_at_entry=entry_snapshot.funding_rate,
                 open_interest_at_entry=entry_snapshot.open_interest,
                 strategy_params_at_entry=strategy_params,
+                signal_factors=signal_factors or [],
+                filter_decisions=filter_decisions or [],
+                sizing_inputs=sizing_inputs,
+                portfolio_state_at_entry=portfolio_state_at_entry,
                 expected_entry_price=expected_entry_price,
                 entry_slippage_bps=round(entry_slippage_bps, 2) if entry_slippage_bps else None,
                 entry_latency_ms=entry_latency_ms,

@@ -135,7 +135,7 @@ class BreakoutEngine:
         self._equity = equity
         self._news_calendar: list[tuple[str, datetime]] = news_calendar or []
         self._market_cal = market_calendar
-        self._instr = instrumentation
+        self._kit = instrumentation
 
         # Per-symbol campaign state
         self.campaigns: dict[str, SymbolCampaign] = {
@@ -756,14 +756,9 @@ class BreakoutEngine:
         await self._manage_exits(now_et)
 
         # Hook 1: Market snapshot + regime classification (post-decision)
-        if self._instr:
-            try:
-                from instrumentation.src.hooks import safe_instrument, async_safe_instrument
-                for sym in self._config:
-                    await async_safe_instrument(self._instr.regime_classifier.classify, sym)
-                    safe_instrument(self._instr.snapshot_service.capture_now, sym)
-            except Exception:
-                pass
+        if self._kit:
+            for sym in self._config:
+                self._kit.capture_snapshot(sym)
 
     async def _on_hourly_close(self, symbol: str, now_et: datetime) -> None:
         """Per-symbol hourly logic: entries, adds, pending re-check."""
@@ -1549,24 +1544,12 @@ class BreakoutEngine:
             await self._recorder.record(record.__dict__)
 
         # Hook 5: Instrumentation trade exit + process scoring
-        if self._instr:
-            try:
-                from instrumentation.src.hooks import safe_instrument
-                trade_event = safe_instrument(
-                    self._instr.trade_logger.log_exit,
-                    trade_id=setup.setup_id,
-                    exit_price=exit_price,
-                    exit_reason=reason,
-                )
-                if trade_event:
-                    safe_instrument(
-                        self._instr.process_scorer.score_and_write,
-                        trade_event.to_dict(),
-                        "BREAKOUT",
-                        self._instr.data_dir,
-                    )
-            except Exception:
-                pass
+        if self._kit:
+            self._kit.log_exit(
+                trade_id=setup.setup_id,
+                exit_price=exit_price,
+                exit_reason=reason,
+            )
 
         logger.info("%s: Position closed — reason=%s, R=%.2f", setup.symbol, reason, setup.r_state)
 
@@ -1726,31 +1709,28 @@ class BreakoutEngine:
                     logger.info("%s: Filled %d @ %.2f", setup.symbol, setup.fill_qty, setup.fill_price)
 
                     # Hook 4: Instrumentation trade entry
-                    if self._instr:
-                        try:
-                            from instrumentation.src.hooks import safe_instrument
-                            side_str = "LONG" if setup.direction == Direction.LONG else "SHORT"
-                            regime = self._instr.regime_classifier.current_regime(setup.symbol)
-                            safe_instrument(
-                                self._instr.trade_logger.log_entry,
-                                trade_id=setup.setup_id,
-                                pair=setup.symbol,
-                                side=side_str,
-                                entry_price=setup.fill_price,
-                                position_size=float(setup.fill_qty),
-                                position_size_quote=setup.fill_price * setup.fill_qty,
-                                entry_signal=setup.entry_type.value if hasattr(setup.entry_type, 'value') else str(setup.entry_type),
-                                entry_signal_id=setup.setup_id,
-                                entry_signal_strength=0.5,
-                                active_filters=[],
-                                passed_filters=[],
-                                strategy_params={"final_risk_dollars": setup.final_risk_dollars},
-                                strategy_id=STRATEGY_ID,
-                                expected_entry_price=setup.fill_price,
-                                market_regime=regime,
-                            )
-                        except Exception:
-                            pass
+                    if self._kit:
+                        self._kit.log_entry(
+                            trade_id=setup.setup_id,
+                            pair=setup.symbol,
+                            side="LONG" if setup.direction == Direction.LONG else "SHORT",
+                            entry_price=setup.fill_price,
+                            position_size=float(setup.fill_qty),
+                            position_size_quote=setup.fill_price * setup.fill_qty,
+                            entry_signal=setup.entry_type.value if hasattr(setup.entry_type, 'value') else str(setup.entry_type),
+                            entry_signal_id=setup.setup_id,
+                            entry_signal_strength=setup.quality_mult if hasattr(setup, 'quality_mult') else 0.5,
+                            active_filters=[],
+                            passed_filters=[],
+                            strategy_params={"final_risk_dollars": setup.final_risk_dollars},
+                            expected_entry_price=setup.fill_price,
+                            sizing_inputs={
+                                "target_risk_pct": self._base_risk_pct if hasattr(self, '_base_risk_pct') else 0.01,
+                                "account_equity": self._equity if hasattr(self, '_equity') else 0.0,
+                                "volatility_basis": setup.final_risk_dollars,
+                                "sizing_model": "breakout_r_risk",
+                            },
+                        )
 
                     # Submit bracket orders (stop + TP) for position protection
                     await self._submit_bracket_orders(setup)

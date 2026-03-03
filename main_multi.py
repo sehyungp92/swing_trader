@@ -99,19 +99,55 @@ async def main() -> None:
     trade_recorder = bootstrap_ctx.trade_recorder
 
     # -------------------------------------------------------------------
-    # 4b. Bootstrap instrumentation (graceful degradation)
+    # 4b. Bootstrap instrumentation (per-strategy kits)
     # -------------------------------------------------------------------
     instrumentation_ctx = None
+    atrss_kit = None
+    helix_kit = None
+    breakout_kit = None
+    s5_pb_kit = None
+    s5_dual_kit = None
     try:
-        from instrumentation.src.bootstrap import bootstrap_instrumentation
+        from instrumentation.src.bootstrap import bootstrap_instrumentation, bootstrap_kit
 
-        # Collect all symbols across strategies for snapshot registration
+        # Shared context for overlay engine and periodic tasks (daily snapshots, backfill)
         all_symbols = sorted(set(
             list(ATRSS_CONFIGS) + list(HELIX_CONFIGS) + list(BREAKOUT_CONFIGS)
             + list(S5_PB_CONFIGS) + list(S5_DUAL_CONFIGS)
         ))
         instrumentation_ctx = bootstrap_instrumentation(symbols=all_symbols)
         logger.info("Instrumentation bootstrapped for %s", all_symbols)
+
+        # Per-strategy InstrumentationKits (each gets its own bot_id)
+        atrss_kit = bootstrap_kit(
+            strategy_id=ATRSS_ID,
+            symbols=list(ATRSS_CONFIGS.keys()),
+        )
+        logger.info("ATRSS InstrumentationKit bootstrapped")
+
+        helix_kit = bootstrap_kit(
+            strategy_id=HELIX_ID,
+            symbols=list(HELIX_CONFIGS.keys()),
+        )
+        logger.info("AKC_HELIX InstrumentationKit bootstrapped")
+
+        breakout_kit = bootstrap_kit(
+            strategy_id=BREAKOUT_ID,
+            symbols=list(BREAKOUT_CONFIGS.keys()),
+        )
+        logger.info("SWING_BREAKOUT_V3 InstrumentationKit bootstrapped")
+
+        s5_pb_kit = bootstrap_kit(
+            strategy_id=S5_PB_STRATEGY_ID,
+            symbols=list(S5_PB_CONFIGS.keys()),
+        )
+        logger.info("S5_PB InstrumentationKit bootstrapped")
+
+        s5_dual_kit = bootstrap_kit(
+            strategy_id=S5_DUAL_STRATEGY_ID,
+            symbols=list(S5_DUAL_CONFIGS.keys()),
+        )
+        logger.info("S5_DUAL InstrumentationKit bootstrapped")
     except Exception:
         logger.warning("Instrumentation bootstrap failed — running without instrumentation", exc_info=True)
 
@@ -250,6 +286,18 @@ async def main() -> None:
         except Exception:
             logger.warning("Instrumentation start failed", exc_info=True)
 
+    # Start per-strategy InstrumentationKit contexts
+    for kit_name, kit_obj in [
+        ("ATRSS", atrss_kit), ("AKC_HELIX", helix_kit),
+        ("SWING_BREAKOUT_V3", breakout_kit),
+        ("S5_PB", s5_pb_kit), ("S5_DUAL", s5_dual_kit),
+    ]:
+        if kit_obj is not None:
+            try:
+                kit_obj._ctx.start()
+            except Exception:
+                logger.warning("%s Kit context start failed", kit_name, exc_info=True)
+
     # -------------------------------------------------------------------
     # 10. Create strategy engines (shared OMS, coordinator)
     # -------------------------------------------------------------------
@@ -261,7 +309,7 @@ async def main() -> None:
         trade_recorder=trade_recorder,
         equity=equity,
         market_calendar=market_cal,
-        instrumentation=instrumentation_ctx,
+        kit=atrss_kit,
     )
 
     helix_engine = HelixEngine(
@@ -273,7 +321,7 @@ async def main() -> None:
         equity=equity,
         coordinator=coordinator,
         market_calendar=market_cal,
-        instrumentation=instrumentation_ctx,
+        instrumentation_kit=helix_kit,
     )
 
     breakout_engine = BreakoutEngine(
@@ -284,7 +332,7 @@ async def main() -> None:
         trade_recorder=trade_recorder,
         equity=equity,
         market_calendar=market_cal,
-        instrumentation=instrumentation_ctx,
+        instrumentation=breakout_kit,
     )
 
     s5_pb_engine = KeltnerEngine(
@@ -296,7 +344,7 @@ async def main() -> None:
         trade_recorder=trade_recorder,
         equity=equity,
         market_calendar=market_cal,
-        instrumentation=instrumentation_ctx,
+        kit=s5_pb_kit,
     )
 
     s5_dual_engine = KeltnerEngine(
@@ -308,7 +356,7 @@ async def main() -> None:
         trade_recorder=trade_recorder,
         equity=equity,
         market_calendar=market_cal,
-        instrumentation=instrumentation_ctx,
+        kit=s5_dual_kit,
     )
 
     overlay_engine = OverlayEngine(
@@ -464,6 +512,18 @@ async def main() -> None:
             logger.info("Instrumentation stopped")
         except Exception:
             logger.debug("Instrumentation stop failed", exc_info=True)
+
+    # 2c. Stop per-strategy InstrumentationKit contexts
+    for kit_name, kit_obj in [
+        ("ATRSS", atrss_kit), ("AKC_HELIX", helix_kit),
+        ("SWING_BREAKOUT_V3", breakout_kit),
+        ("S5_PB", s5_pb_kit), ("S5_DUAL", s5_dual_kit),
+    ]:
+        if kit_obj is not None:
+            try:
+                kit_obj._ctx.stop()
+            except Exception:
+                logger.debug("%s Kit context stop failed", kit_name, exc_info=True)
 
     # 3. Close database (after OMS has flushed all state)
     if bootstrap_ctx.has_db:

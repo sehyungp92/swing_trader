@@ -127,3 +127,68 @@ class TestTradeLogger:
             strategy_params={}, strategy_id="ATRSS",
         )
         assert trade.strategy_id == "ATRSS"
+
+    def test_trade_event_has_enriched_fields(self):
+        """Verify new enriched fields can be set and serialized via to_dict()."""
+        trade = self.logger.log_entry(
+            trade_id="t1", pair="BTC/USDT", side="LONG",
+            entry_price=50000, position_size=1.0, position_size_quote=50000,
+            entry_signal="test", entry_signal_id="test",
+            entry_signal_strength=0.5, active_filters=[], passed_filters=[],
+            strategy_params={},
+        )
+
+        # Manually set the enriched fields
+        trade.signal_factors = [{"factor": "EMA_cross", "strength": 0.85}]
+        trade.filter_decisions = [{"filter": "volume", "passed": True, "distance_to_threshold": 0.2}]
+        trade.sizing_inputs = {"kelly_fraction": 0.25, "max_loss": 500}
+        trade.portfolio_state_at_entry = {"total_exposure": 0.5, "direction": "LONG"}
+
+        # Verify we can serialize to dict
+        trade_dict = trade.to_dict()
+
+        assert trade_dict["signal_factors"] == [{"factor": "EMA_cross", "strength": 0.85}]
+        assert trade_dict["filter_decisions"] == [{"filter": "volume", "passed": True, "distance_to_threshold": 0.2}]
+        assert trade_dict["sizing_inputs"] == {"kelly_fraction": 0.25, "max_loss": 500}
+        assert trade_dict["portfolio_state_at_entry"] == {"total_exposure": 0.5, "direction": "LONG"}
+
+    def test_trade_event_enriched_fields_default_empty(self):
+        """Verify defaults: empty list for signal_factors/filter_decisions, None for sizing_inputs/portfolio_state_at_entry."""
+        trade = self.logger.log_entry(
+            trade_id="t1", pair="BTC/USDT", side="LONG",
+            entry_price=50000, position_size=1.0, position_size_quote=50000,
+            entry_signal="test", entry_signal_id="test",
+            entry_signal_strength=0.5, active_filters=[], passed_filters=[],
+            strategy_params={},
+        )
+
+        # Verify defaults
+        assert trade.signal_factors == []
+        assert trade.filter_decisions == []
+        assert trade.sizing_inputs is None
+        assert trade.portfolio_state_at_entry is None
+
+    def test_log_entry_stores_enriched_fields(self):
+        """log_entry must pass signal_factors, filter_decisions, sizing_inputs, portfolio_state to TradeEvent."""
+        sf = [{"factor_name": "adx", "factor_value": 30, "threshold": 25, "contribution": "trend"}]
+        fd = [{"filter_name": "gate", "threshold": 3, "actual_value": 5, "passed": True, "margin_pct": 66.7}]
+        si = {"target_risk_pct": 0.02, "account_equity": 100000, "volatility_basis": 1.5, "sizing_model": "atr"}
+        ps = {"total_exposure_pct": 0.3, "net_direction": "LONG", "num_positions": 2, "correlated_positions": []}
+
+        event = self.logger.log_entry(
+            trade_id="t_enriched",
+            pair="QQQ", side="LONG",
+            entry_price=500.0, position_size=10.0, position_size_quote=5000.0,
+            entry_signal="PB", entry_signal_id="x", entry_signal_strength=0.7,
+            active_filters=["gate"], passed_filters=["gate"],
+            strategy_params={"atrh": 1.5},
+            signal_factors=sf,
+            filter_decisions=fd,
+            sizing_inputs=si,
+            portfolio_state_at_entry=ps,
+        )
+
+        assert event.signal_factors == sf
+        assert event.filter_decisions == fd
+        assert event.sizing_inputs == si
+        assert event.portfolio_state_at_entry == ps

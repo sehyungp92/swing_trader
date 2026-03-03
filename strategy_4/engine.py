@@ -80,7 +80,7 @@ class KeltnerEngine:
         trade_recorder: TradeRecorder | None = None,
         equity: float = 100_000.0,
         market_calendar: Any | None = None,
-        instrumentation: Any | None = None,
+        kit: Any | None = None,
     ) -> None:
         self._strategy_id = strategy_id
         self._ib = ib_session
@@ -90,7 +90,7 @@ class KeltnerEngine:
         self._recorder = trade_recorder
         self._equity = equity
         self._market_cal = market_calendar
-        self._instr = instrumentation
+        self._kit = kit
 
         # Per-symbol state
         self.positions: dict[str, _LivePosition] = {}
@@ -194,14 +194,9 @@ class KeltnerEngine:
                                  self._strategy_id, sym)
 
         # Hook 1: Market snapshot + regime classification (post-decision)
-        if self._instr:
-            try:
-                from instrumentation.src.hooks import safe_instrument, async_safe_instrument
-                for sym in self._config:
-                    await async_safe_instrument(self._instr.regime_classifier.classify, sym)
-                    safe_instrument(self._instr.snapshot_service.capture_now, sym)
-            except Exception:
-                pass
+        if self._kit:
+            for sym in self._config:
+                self._kit.capture_snapshot(sym)
 
     # ------------------------------------------------------------------
     # Per-symbol daily logic
@@ -663,31 +658,29 @@ class KeltnerEngine:
             )
 
             # Hook 4: Instrumentation trade entry
-            if self._instr:
-                try:
-                    from instrumentation.src.hooks import safe_instrument
-                    side_str = "LONG" if direction == Direction.LONG else "SHORT"
-                    regime = self._instr.regime_classifier.current_regime(symbol)
-                    safe_instrument(
-                        self._instr.trade_logger.log_entry,
-                        trade_id=f"{symbol}_{pos.entry_time.isoformat()}",
-                        pair=symbol,
-                        side=side_str,
-                        entry_price=fill_price,
-                        position_size=float(fill_qty),
-                        position_size_quote=fill_price * fill_qty,
-                        entry_signal="keltner_breakout",
-                        entry_signal_id=f"{symbol}_kelt_{pos.entry_time.isoformat()}",
-                        entry_signal_strength=0.5,
-                        active_filters=[],
-                        passed_filters=[],
-                        strategy_params={"stop_dist": stop_dist, "r_price": r_price},
-                        strategy_id=self._strategy_id,
-                        expected_entry_price=fill_price,
-                        market_regime=regime,
-                    )
-                except Exception:
-                    pass
+            if self._kit:
+                side_str = "LONG" if direction == Direction.LONG else "SHORT"
+                self._kit.log_entry(
+                    trade_id=f"{symbol}_{pos.entry_time.isoformat()}",
+                    pair=symbol,
+                    side=side_str,
+                    entry_price=fill_price,
+                    position_size=float(fill_qty),
+                    position_size_quote=fill_price * fill_qty,
+                    entry_signal="keltner_breakout",
+                    entry_signal_id=f"{symbol}_kelt_{pos.entry_time.isoformat()}",
+                    entry_signal_strength=0.5,
+                    active_filters=[],
+                    passed_filters=[],
+                    strategy_params={"stop_dist": stop_dist, "r_price": r_price},
+                    expected_entry_price=fill_price,
+                    sizing_inputs={
+                        "target_risk_pct": self._config[symbol].base_risk_pct,
+                        "account_equity": self._equity,
+                        "volatility_basis": stop_dist,
+                        "sizing_model": "keltner_atr",
+                    },
+                )
 
             # Submit protective stop
             await self._submit_protective_stop(symbol, pos)
@@ -701,25 +694,9 @@ class KeltnerEngine:
                 )
                 await self._record_trade(pos, fill_price, "STOP")
                 # Hook 5: Instrumentation trade exit + process scoring
-                if self._instr:
-                    try:
-                        from instrumentation.src.hooks import safe_instrument
-                        tid = f"{symbol}_{pos.entry_time.isoformat()}"
-                        trade_event = safe_instrument(
-                            self._instr.trade_logger.log_exit,
-                            trade_id=tid,
-                            exit_price=fill_price,
-                            exit_reason="STOP_LOSS",
-                        )
-                        if trade_event:
-                            safe_instrument(
-                                self._instr.process_scorer.score_and_write,
-                                trade_event.to_dict(),
-                                self._strategy_id,
-                                self._instr.data_dir,
-                            )
-                    except Exception:
-                        pass
+                if self._kit:
+                    tid = f"{symbol}_{pos.entry_time.isoformat()}"
+                    self._kit.log_exit(trade_id=tid, exit_price=fill_price, exit_reason="STOP_LOSS")
 
         elif role == "signal_exit":
             pos = self.positions.pop(symbol, None)
@@ -730,25 +707,9 @@ class KeltnerEngine:
                 )
                 await self._record_trade(pos, fill_price, "SIGNAL_EXIT")
                 # Hook 5: Instrumentation trade exit + process scoring
-                if self._instr:
-                    try:
-                        from instrumentation.src.hooks import safe_instrument
-                        tid = f"{symbol}_{pos.entry_time.isoformat()}"
-                        trade_event = safe_instrument(
-                            self._instr.trade_logger.log_exit,
-                            trade_id=tid,
-                            exit_price=fill_price,
-                            exit_reason="SIGNAL",
-                        )
-                        if trade_event:
-                            safe_instrument(
-                                self._instr.process_scorer.score_and_write,
-                                trade_event.to_dict(),
-                                self._strategy_id,
-                                self._instr.data_dir,
-                            )
-                    except Exception:
-                        pass
+                if self._kit:
+                    tid = f"{symbol}_{pos.entry_time.isoformat()}"
+                    self._kit.log_exit(trade_id=tid, exit_price=fill_price, exit_reason="SIGNAL")
 
         # Cleanup order tracking
         self._order_to_symbol.pop(oms_order_id, None)

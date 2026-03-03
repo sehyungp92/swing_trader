@@ -19,6 +19,7 @@ async def main() -> None:
     from shared.oms.services.factory import build_oms_service
     from shared.oms.risk.calculator import RiskCalculator
     from shared.services.bootstrap import bootstrap_database
+    from instrumentation.src.bootstrap import bootstrap_kit
 
     from .config import (
         STRATEGY_ID,
@@ -105,7 +106,17 @@ async def main() -> None:
     logger.info("OMS service started")
 
     # -------------------------------------------------------------------
-    # 8. Create and start Breakout engine
+    # 8. Bootstrap instrumentation kit
+    # -------------------------------------------------------------------
+    kit = bootstrap_kit(
+        strategy_id=STRATEGY_ID,
+        symbols=list(SYMBOL_CONFIGS.keys()),
+    )
+    kit._ctx.start()
+    logger.info("Instrumentation kit started for %s", STRATEGY_ID)
+
+    # -------------------------------------------------------------------
+    # 9. Create and start Breakout engine
     # -------------------------------------------------------------------
     engine = BreakoutEngine(
         ib_session=session,
@@ -114,6 +125,7 @@ async def main() -> None:
         config=SYMBOL_CONFIGS,
         trade_recorder=trade_recorder,
         equity=equity,
+        instrumentation=kit,
     )
     await engine.start()
 
@@ -146,6 +158,7 @@ async def main() -> None:
     # -------------------------------------------------------------------
     logger.info("Shutting down …")
     await engine.stop()
+    kit._ctx.stop()
     await oms.stop()
     await session.stop()
 

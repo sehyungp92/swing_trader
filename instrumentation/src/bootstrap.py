@@ -2,9 +2,16 @@
 
 Usage::
 
-    from instrumentation.src.bootstrap import bootstrap_instrumentation
+    from instrumentation.src.bootstrap import bootstrap_instrumentation, bootstrap_kit
+
+    # Create context directly
     ctx = bootstrap_instrumentation(symbols=["QQQ", "SPY"])
     ctx.start()
+
+    # Or create a Kit facade (recommended for most use cases)
+    kit = bootstrap_kit(strategy_id="ATRSS", symbols=["QQQ", "SPY"])
+    kit._ctx.start()
+    trade = kit.log_entry(...)
 """
 from __future__ import annotations
 
@@ -20,6 +27,7 @@ _CONFIG_PATH = Path("instrumentation/config/instrumentation_config.yaml")
 def bootstrap_instrumentation(
     symbols: list[str] | None = None,
     data_provider=None,
+    strategy_id: str | None = None,
 ) -> "InstrumentationContext":
     """Create an InstrumentationContext with all services wired up.
 
@@ -27,6 +35,8 @@ def bootstrap_instrumentation(
         symbols: Active trading symbols (populates market_snapshots.symbols).
         data_provider: Optional data source for snapshots/regime. None is fine —
             snapshots degrade gracefully to zeros.
+        strategy_id: Optional strategy identifier to override config bot_id.
+            If provided, sets config["bot_id"] = strategy_id.
 
     Returns:
         Fully wired InstrumentationContext ready for ``ctx.start()``.
@@ -41,6 +51,8 @@ def bootstrap_instrumentation(
     from .sidecar import Sidecar
 
     config = _load_config()
+    if strategy_id:
+        config["bot_id"] = strategy_id
 
     # Populate symbols into config
     if symbols:
@@ -70,6 +82,34 @@ def bootstrap_instrumentation(
         symbols, ctx.data_dir,
     )
     return ctx
+
+
+def bootstrap_kit(
+    strategy_id: str,
+    symbols: list[str] | None = None,
+    data_provider=None,
+) -> "InstrumentationKit":
+    """Create an InstrumentationKit with all services wired up.
+
+    Convenience wrapper: bootstraps context + wraps in Kit facade.
+
+    Args:
+        strategy_id: Strategy identifier (used as bot_id and for scoring).
+        symbols: Active trading symbols.
+        data_provider: Optional data source for snapshots/regime.
+
+    Returns:
+        InstrumentationKit ready for log_entry/log_exit calls.
+        Call kit._ctx.start() to enable sidecar forwarding.
+    """
+    from .kit import InstrumentationKit
+
+    ctx = bootstrap_instrumentation(
+        symbols=symbols,
+        data_provider=data_provider,
+        strategy_id=strategy_id,
+    )
+    return InstrumentationKit(ctx, strategy_id=strategy_id)
 
 
 def _load_config() -> dict:

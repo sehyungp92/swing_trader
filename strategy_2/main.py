@@ -19,6 +19,7 @@ async def main() -> None:
     from shared.oms.services.factory import build_oms_service
     from shared.oms.risk.calculator import RiskCalculator
     from shared.services.bootstrap import bootstrap_database
+    from instrumentation.src.bootstrap import bootstrap_kit
 
     from .config import (
         PORTFOLIO_CAP_R,
@@ -120,7 +121,16 @@ async def main() -> None:
     #           news_calendar.append((entry["type"], datetime.fromisoformat(entry["datetime"])))
 
     # -------------------------------------------------------------------
-    # 9. Create and start Helix engine
+    # 9. Bootstrap instrumentation kit
+    # -------------------------------------------------------------------
+    kit = bootstrap_kit(
+        strategy_id=STRATEGY_ID,
+        symbols=list(SYMBOL_CONFIGS.keys()),
+    )
+    kit._ctx.start()
+
+    # -------------------------------------------------------------------
+    # 10. Create and start Helix engine
     # -------------------------------------------------------------------
     engine = HelixEngine(
         ib_session=session,
@@ -130,11 +140,12 @@ async def main() -> None:
         trade_recorder=trade_recorder,
         equity=equity,
         news_calendar=news_calendar,
+        instrumentation_kit=kit,
     )
     await engine.start()
 
     # -------------------------------------------------------------------
-    # 10. Run until interrupted
+    # 11. Run until interrupted
     # -------------------------------------------------------------------
     stop_event = asyncio.Event()
 
@@ -158,12 +169,13 @@ async def main() -> None:
         pass
 
     # -------------------------------------------------------------------
-    # 11. Graceful shutdown
+    # 12. Graceful shutdown
     # -------------------------------------------------------------------
     logger.info("Shutting down …")
     await engine.stop()
     await oms.stop()
     await session.stop()
+    kit._ctx.stop()
 
     if bootstrap_ctx.has_db:
         from shared.services.bootstrap import shutdown_database

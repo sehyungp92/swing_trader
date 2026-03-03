@@ -147,7 +147,7 @@ class HelixEngine:
         news_calendar: list[tuple[str, datetime]] | None = None,
         coordinator: Any = None,
         market_calendar: Any | None = None,
-        instrumentation: Any | None = None,
+        instrumentation_kit: Any | None = None,
     ) -> None:
         self._ib = ib_session
         self._oms = oms_service
@@ -158,7 +158,7 @@ class HelixEngine:
         self._news_calendar: list[tuple[str, datetime]] = news_calendar or []
         self._coordinator = coordinator
         self._market_cal = market_calendar
-        self._instr = instrumentation
+        self._kit = instrumentation_kit
 
         # Per-symbol state
         self.daily_states: dict[str, DailyState] = {}
@@ -452,25 +452,19 @@ class HelixEngine:
             )
 
             # Hook 3: Log allocator rejections as missed opportunities
-            if self._instr:
+            if self._kit:
                 accepted_ids = {s.setup_id for s in accepted}
                 for setup in all_candidates:
                     if setup.setup_id not in accepted_ids:
-                        try:
-                            from instrumentation.src.hooks import safe_instrument
-                            safe_instrument(
-                                self._instr.missed_logger.log_missed,
-                                pair=setup.symbol,
-                                side="LONG" if setup.direction == Direction.LONG else "SHORT",
-                                signal=setup.setup_class.value,
-                                signal_id=setup.setup_id,
-                                signal_strength=0.5,
-                                blocked_by="allocator",
-                                block_reason="rejected by portfolio allocator",
-                                strategy_id=STRATEGY_ID,
-                            )
-                        except Exception:
-                            pass
+                        self._kit.log_missed(
+                            pair=setup.symbol,
+                            side="LONG" if setup.direction == Direction.LONG else "SHORT",
+                            signal=setup.setup_class.value,
+                            signal_id=setup.setup_id,
+                            signal_strength=0.5,
+                            blocked_by="allocator",
+                            block_reason="rejected by portfolio allocator",
+                        )
 
             for setup in accepted:
                 cfg = self._config.get(setup.symbol)
@@ -489,14 +483,10 @@ class HelixEngine:
                     logger.info("Queued %s %s (outside window)", setup.symbol, setup.setup_id[:8])
 
         # Hook 1: Market snapshot + regime classification (post-decision)
-        if self._instr:
-            try:
-                from instrumentation.src.hooks import safe_instrument, async_safe_instrument
-                for sym in self._config:
-                    await async_safe_instrument(self._instr.regime_classifier.classify, sym)
-                    safe_instrument(self._instr.snapshot_service.capture_now, sym)
-            except Exception:
-                pass
+        if self._kit:
+            for sym in self._config:
+                self._kit.classify_regime(sym)
+                self._kit.capture_snapshot(sym)
 
     async def _cycle_symbol(
         self, sym: str, now: datetime, is_4h_boundary: bool
@@ -1742,28 +1732,16 @@ class HelixEngine:
         )
 
         # Hook 5: Instrumentation trade exit (flatten)
-        if self._instr and setup.fill_price > 0:
-            try:
-                from instrumentation.src.hooks import safe_instrument
-                tid = setup.trade_id or setup.setup_id
-                # Use last known price as exit price estimate
-                current_price = self._get_current_price(setup.symbol)
-                exit_price = current_price if current_price > 0 else setup.fill_price
-                trade_event = safe_instrument(
-                    self._instr.trade_logger.log_exit,
-                    trade_id=tid,
-                    exit_price=exit_price,
-                    exit_reason="FLATTEN",
-                )
-                if trade_event:
-                    safe_instrument(
-                        self._instr.process_scorer.score_and_write,
-                        trade_event.to_dict(),
-                        "HELIX",
-                        self._instr.data_dir,
-                    )
-            except Exception:
-                pass
+        if self._kit and setup.fill_price > 0:
+            tid = setup.trade_id or setup.setup_id
+            # Use last known price as exit price estimate
+            current_price = self._get_current_price(setup.symbol)
+            exit_price = current_price if current_price > 0 else setup.fill_price
+            self._kit.log_exit(
+                trade_id=tid,
+                exit_price=exit_price,
+                exit_reason="FLATTEN",
+            )
 
         setup.state = SetupState.CLOSED
         self.active_setups.pop(setup.setup_id, None)
@@ -2009,35 +1987,38 @@ class HelixEngine:
         )
 
         # Hook 4: Instrumentation trade entry
-        if self._instr:
-            try:
-                from instrumentation.src.hooks import safe_instrument
-                side_str = "LONG" if setup.direction == Direction.LONG else "SHORT"
-                regime = self._instr.regime_classifier.current_regime(setup.symbol)
-                safe_instrument(
-                    self._instr.trade_logger.log_entry,
-                    trade_id=setup.trade_id or setup.setup_id,
-                    pair=setup.symbol,
-                    side=side_str,
-                    entry_price=fill_price,
-                    position_size=float(fill_qty),
-                    position_size_quote=fill_price * fill_qty,
-                    entry_signal=setup.setup_class.value,
-                    entry_signal_id=setup.setup_id,
-                    entry_signal_strength=0.5,
-                    active_filters=[],
-                    passed_filters=[],
-                    strategy_params={
-                        "adx_at_entry": setup.adx_at_entry,
-                        "regime_4h": setup.regime_4h_at_entry,
-                        "size_mult": setup.setup_size_mult,
-                    },
-                    strategy_id=STRATEGY_ID,
-                    expected_entry_price=setup.bos_level,
-                    market_regime=regime,
-                )
-            except Exception:
-                pass
+        if self._kit:
+            side_str = "LONG" if setup.direction == Direction.LONG else "SHORT"
+            self._kit.log_entry(
+                trade_id=setup.trade_id or setup.setup_id,
+                pair=setup.symbol,
+                side=side_str,
+                entry_price=fill_price,
+                position_size=float(fill_qty),
+                position_size_quote=fill_price * fill_qty,
+                entry_signal=setup.setup_class.value,
+                entry_signal_id=setup.setup_id,
+                entry_signal_strength=0.5,
+                active_filters=[],
+                passed_filters=[],
+                strategy_params={
+                    "adx_at_entry": setup.adx_at_entry,
+                    "regime_4h": setup.regime_4h_at_entry,
+                    "size_mult": setup.setup_size_mult,
+                },
+                expected_entry_price=setup.bos_level,
+                signal_factors=[
+                    {"factor_name": "adx", "factor_value": setup.adx_at_entry, "threshold": 20.0, "contribution": "trend_strength"},
+                    {"factor_name": "setup_class", "factor_value": setup.setup_class.value, "threshold": "CLASS_A", "contribution": "setup_quality"},
+                    {"factor_name": "size_mult", "factor_value": setup.setup_size_mult, "threshold": 0.5, "contribution": "conviction"},
+                ],
+                sizing_inputs={
+                    "target_risk_pct": self._base_risk_pct if hasattr(self, '_base_risk_pct') else 0.01,
+                    "account_equity": self._equity if hasattr(self, '_equity') else 0.0,
+                    "volatility_basis": setup.adx_at_entry,
+                    "sizing_model": "helix_class_mult",
+                },
+            )
 
     async def _on_stop_fill(self, oms_order_id: str, payload: dict) -> None:
         """Handle a stop-loss fill — record exit, update circuit breaker."""
@@ -2109,25 +2090,13 @@ class HelixEngine:
                 self.circuit_breakers[setup.symbol] = cb
 
                 # Hook 5: Instrumentation trade exit + process scoring
-                if self._instr:
-                    try:
-                        from instrumentation.src.hooks import safe_instrument
-                        tid = setup.trade_id or setup.setup_id
-                        trade_event = safe_instrument(
-                            self._instr.trade_logger.log_exit,
-                            trade_id=tid,
-                            exit_price=fill_price,
-                            exit_reason="STOP_LOSS",
-                        )
-                        if trade_event:
-                            safe_instrument(
-                                self._instr.process_scorer.score_and_write,
-                                trade_event.to_dict(),
-                                "HELIX",
-                                self._instr.data_dir,
-                            )
-                    except Exception:
-                        pass
+                if self._kit:
+                    tid = setup.trade_id or setup.setup_id
+                    self._kit.log_exit(
+                        trade_id=tid,
+                        exit_price=fill_price,
+                        exit_reason="STOP_LOSS",
+                    )
 
                 # Clean up
                 setup.state = SetupState.CLOSED

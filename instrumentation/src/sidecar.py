@@ -29,6 +29,7 @@ _DIR_TO_EVENT_TYPE = {
     "errors": "error",
     "scores": "process_quality",
     "daily": "daily_snapshot",
+    "post_exit": "post_exit",
 }
 
 

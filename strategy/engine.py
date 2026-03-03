@@ -118,7 +118,7 @@ class ATRSSEngine:
         trade_recorder: TradeRecorder | None = None,
         equity: float = 100_000.0,
         market_calendar: Any | None = None,
-        instrumentation: Any | None = None,
+        kit: Any | None = None,
     ) -> None:
         self._ib = ib_session
         self._oms = oms_service
@@ -127,7 +127,7 @@ class ATRSSEngine:
         self._recorder = trade_recorder
         self._equity = equity
         self._market_cal = market_calendar
-        self._instr = instrumentation
+        self._kit = kit
 
         # Per-symbol state
         self.daily_states: dict[str, DailyState] = {}
@@ -304,39 +304,28 @@ class ATRSSEngine:
             )
 
             # Hook 3: Log allocator rejections as missed opportunities
-            if self._instr:
+            if self._kit:
                 accepted_syms = {c.symbol for c in accepted}
                 for cand in all_candidates:
                     if cand.symbol not in accepted_syms:
-                        try:
-                            from instrumentation.src.hooks import safe_instrument
-                            safe_instrument(
-                                self._instr.missed_logger.log_missed,
-                                pair=cand.symbol,
-                                side="LONG" if cand.direction == Direction.LONG else "SHORT",
-                                signal=cand.type.value,
-                                signal_id=f"{cand.symbol}_{cand.type.value}_{now.isoformat()}",
-                                signal_strength=cand.quality_score if hasattr(cand, 'quality_score') else 0.5,
-                                blocked_by="allocator",
-                                block_reason="rejected by portfolio allocator",
-                                strategy_id=STRATEGY_ID,
-                                market_regime=self._instr.regime_classifier.current_regime(cand.symbol),
-                            )
-                        except Exception:
-                            pass
+                        self._kit.log_missed(
+                            pair=cand.symbol,
+                            side="LONG" if cand.direction == Direction.LONG else "SHORT",
+                            signal=cand.type.value,
+                            signal_id=f"{cand.symbol}_{cand.type.value}_{now.isoformat()}",
+                            signal_strength=cand.quality_score if hasattr(cand, 'quality_score') else 0.5,
+                            blocked_by="allocator",
+                            block_reason="rejected by portfolio allocator",
+                        )
 
             for cand in accepted:
                 await self._submit_entry(cand)
 
         # Hook 1: Market snapshot + regime classification (post-decision, never affects trading)
-        if self._instr:
-            try:
-                from instrumentation.src.hooks import safe_instrument, async_safe_instrument
-                for sym in self._config:
-                    await async_safe_instrument(self._instr.regime_classifier.classify, sym)
-                    safe_instrument(self._instr.snapshot_service.capture_now, sym)
-            except Exception:
-                pass
+        if self._kit:
+            for sym in self._config:
+                self._kit.classify_regime(sym)
+                self._kit.capture_snapshot(sym)
 
     async def _cycle_symbol(self, sym: str, now: datetime) -> None:
         """Per-symbol steps 1-7 of the hourly cycle."""
@@ -424,36 +413,24 @@ class ATRSSEngine:
 
             # Skip SHORT generation if disabled for this symbol (D8)
             if daily.trend_dir == Direction.SHORT and not cfg.shorts_enabled:
-                if self._instr:
-                    try:
-                        from instrumentation.src.hooks import safe_instrument
-                        safe_instrument(
-                            self._instr.missed_logger.log_missed,
-                            pair=sym, side="SHORT", signal="short_disabled",
-                            signal_id=f"{sym}_short_disabled_{now.isoformat()}",
-                            signal_strength=0.0, blocked_by="short_gate",
-                            block_reason="shorts disabled for symbol",
-                            strategy_id=STRATEGY_ID,
-                        )
-                    except Exception:
-                        pass
+                if self._kit:
+                    self._kit.log_missed(
+                        pair=sym, side="SHORT", signal="short_disabled",
+                        signal_id=f"{sym}_short_disabled_{now.isoformat()}",
+                        signal_strength=0.0, blocked_by="short_gate",
+                        block_reason="shorts disabled for symbol",
+                    )
                 continue
 
             # Per-symbol short gate (R1)
             if daily.trend_dir == Direction.SHORT and not signals.short_symbol_gate(sym, daily, hourly):
-                if self._instr:
-                    try:
-                        from instrumentation.src.hooks import safe_instrument
-                        safe_instrument(
-                            self._instr.missed_logger.log_missed,
-                            pair=sym, side="SHORT", signal="short_gate_fail",
-                            signal_id=f"{sym}_short_gate_{now.isoformat()}",
-                            signal_strength=0.0, blocked_by="short_gate",
-                            block_reason="short symbol gate failed",
-                            strategy_id=STRATEGY_ID,
-                        )
-                    except Exception:
-                        pass
+                if self._kit:
+                    self._kit.log_missed(
+                        pair=sym, side="SHORT", signal="short_gate_fail",
+                        signal_id=f"{sym}_short_gate_{now.isoformat()}",
+                        signal_strength=0.0, blocked_by="short_gate",
+                        block_reason="short symbol gate failed",
+                    )
                 continue
 
             # Per-symbol time/day blocking (R2)
@@ -484,22 +461,16 @@ class ATRSSEngine:
                     quality_score = signals.compute_entry_quality(hourly, daily, pb_dir)
                     if quality_score < QUALITY_GATE_THRESHOLD:
                         # Hook 2: Missed opportunity — quality gate
-                        if self._instr:
-                            try:
-                                from instrumentation.src.hooks import safe_instrument
-                                safe_instrument(
-                                    self._instr.missed_logger.log_missed,
-                                    pair=sym,
-                                    side="LONG" if pb_dir == Direction.LONG else "SHORT",
-                                    signal="pullback",
-                                    signal_id=f"{sym}_pb_{now.isoformat()}",
-                                    signal_strength=quality_score,
-                                    blocked_by="quality_gate",
-                                    block_reason=f"quality {quality_score:.2f} < {QUALITY_GATE_THRESHOLD}",
-                                    strategy_id=STRATEGY_ID,
-                                )
-                            except Exception:
-                                pass
+                        if self._kit:
+                            self._kit.log_missed(
+                                pair=sym,
+                                side="LONG" if pb_dir == Direction.LONG else "SHORT",
+                                signal="pullback",
+                                signal_id=f"{sym}_pb_{now.isoformat()}",
+                                signal_strength=quality_score,
+                                blocked_by="quality_gate",
+                                block_reason=f"quality {quality_score:.2f} < {QUALITY_GATE_THRESHOLD}",
+                            )
                         continue
                     if signals.same_direction_reentry_allowed(reentry, pb_dir, now, daily.regime, daily.trend_dir):
                         cand = self._build_candidate(
@@ -520,22 +491,16 @@ class ATRSSEngine:
                         quality_score = signals.compute_entry_quality(hourly, daily, bo_dir)
                         if quality_score < QUALITY_GATE_THRESHOLD:
                             # Hook 2: Missed opportunity — quality gate (breakout)
-                            if self._instr:
-                                try:
-                                    from instrumentation.src.hooks import safe_instrument
-                                    safe_instrument(
-                                        self._instr.missed_logger.log_missed,
-                                        pair=sym,
-                                        side="LONG" if bo_dir == Direction.LONG else "SHORT",
-                                        signal="breakout_pullback",
-                                        signal_id=f"{sym}_bo_{now.isoformat()}",
-                                        signal_strength=quality_score,
-                                        blocked_by="quality_gate",
-                                        block_reason=f"quality {quality_score:.2f} < {QUALITY_GATE_THRESHOLD}",
-                                        strategy_id=STRATEGY_ID,
-                                    )
-                                except Exception:
-                                    pass
+                            if self._kit:
+                                self._kit.log_missed(
+                                    pair=sym,
+                                    side="LONG" if bo_dir == Direction.LONG else "SHORT",
+                                    signal="breakout_pullback",
+                                    signal_id=f"{sym}_bo_{now.isoformat()}",
+                                    signal_strength=quality_score,
+                                    blocked_by="quality_gate",
+                                    block_reason=f"quality {quality_score:.2f} < {QUALITY_GATE_THRESHOLD}",
+                                )
                             continue
                         if signals.momentum_ok(hourly, bo_dir) and signals.same_direction_reentry_allowed(reentry, bo_dir, now, daily.regime, daily.trend_dir):
                             cand = self._build_candidate(
@@ -1473,31 +1438,33 @@ class ATRSSEngine:
             pos.stop_pending = False  # C3: stop placed (or failed — either way, unblock)
 
             # Hook 4: Instrumentation trade entry
-            if self._instr:
-                try:
-                    from instrumentation.src.hooks import safe_instrument
-                    side_str = "LONG" if direction == Direction.LONG else "SHORT"
-                    regime = self._instr.regime_classifier.current_regime(sym)
-                    safe_instrument(
-                        self._instr.trade_logger.log_entry,
-                        trade_id=trade_id or f"{sym}_{fill_time.isoformat()}",
-                        pair=sym,
-                        side=side_str,
-                        entry_price=fill_price,
-                        position_size=float(fill_qty),
-                        position_size_quote=fill_price * fill_qty,
-                        entry_signal=ctype.value,
-                        entry_signal_id=f"{sym}_{ctype.value}_{fill_time.isoformat()}",
-                        entry_signal_strength=meta.get("quality_score", 0.5),
-                        active_filters=["quality_gate", "momentum", "reentry"],
-                        passed_filters=["quality_gate"],
-                        strategy_params={"atrh": atrh, "stop": meta["initial_stop"]},
-                        strategy_id=STRATEGY_ID,
-                        expected_entry_price=meta["trigger_price"],
-                        market_regime=regime,
-                    )
-                except Exception:
-                    pass
+            if self._kit:
+                side_str = "LONG" if direction == Direction.LONG else "SHORT"
+                self._kit.log_entry(
+                    trade_id=trade_id or f"{sym}_{fill_time.isoformat()}",
+                    pair=sym,
+                    side=side_str,
+                    entry_price=fill_price,
+                    position_size=float(fill_qty),
+                    position_size_quote=fill_price * fill_qty,
+                    entry_signal=ctype.value,
+                    entry_signal_id=f"{sym}_{ctype.value}_{fill_time.isoformat()}",
+                    entry_signal_strength=meta.get("quality_score", 0.5),
+                    active_filters=["quality_gate", "momentum", "reentry"],
+                    passed_filters=["quality_gate"],
+                    strategy_params={"atrh": atrh, "stop": meta["initial_stop"]},
+                    expected_entry_price=meta["trigger_price"],
+                    signal_factors=[
+                        {"factor_name": "quality_score", "factor_value": meta.get("quality_score", 0),
+                         "threshold": QUALITY_GATE_THRESHOLD, "contribution": "entry_quality"},
+                    ],
+                    sizing_inputs={
+                        "target_risk_pct": cfg.base_risk_pct,
+                        "account_equity": self._equity,
+                        "volatility_basis": atrh,
+                        "sizing_model": "atr_risk",
+                    },
+                )
 
         elif leg_type == LegType.ADDON_A:
             pos = self.positions.get(sym)
@@ -1604,26 +1571,14 @@ class ATRSSEngine:
                 self.reentry_states[sym] = reentry
 
                 # Hook 5: Instrumentation trade exit + process scoring
-                if self._instr:
-                    try:
-                        from instrumentation.src.hooks import safe_instrument
-                        for leg in pos.legs:
-                            tid = leg.trade_id or f"{sym}_{leg.fill_time.isoformat()}"
-                            trade_event = safe_instrument(
-                                self._instr.trade_logger.log_exit,
-                                trade_id=tid,
-                                exit_price=fill_price,
-                                exit_reason="STOP_LOSS",
-                            )
-                            if trade_event:
-                                safe_instrument(
-                                    self._instr.process_scorer.score_and_write,
-                                    trade_event.to_dict(),
-                                    "ATRSS",
-                                    self._instr.data_dir,
-                                )
-                    except Exception:
-                        pass
+                if self._kit:
+                    for leg in pos.legs:
+                        tid = leg.trade_id or f"{sym}_{leg.fill_time.isoformat()}"
+                        self._kit.log_exit(
+                            trade_id=tid,
+                            exit_price=fill_price,
+                            exit_reason="STOP_LOSS",
+                        )
 
                 # M8: Remove position entirely instead of resetting to empty book
                 self.positions.pop(sym, None)
@@ -1686,26 +1641,14 @@ class ATRSSEngine:
         self.reentry_states[sym] = reentry
 
         # Hook 5: Instrumentation trade exit + process scoring (flatten)
-        if self._instr:
-            try:
-                from instrumentation.src.hooks import safe_instrument
-                for leg in pos.legs:
-                    tid = leg.trade_id or f"{sym}_{leg.fill_time.isoformat()}"
-                    trade_event = safe_instrument(
-                        self._instr.trade_logger.log_exit,
-                        trade_id=tid,
-                        exit_price=fill_price,
-                        exit_reason=reason,
-                    )
-                    if trade_event:
-                        safe_instrument(
-                            self._instr.process_scorer.score_and_write,
-                            trade_event.to_dict(),
-                            "ATRSS",
-                            self._instr.data_dir,
-                        )
-            except Exception:
-                pass
+        if self._kit:
+            for leg in pos.legs:
+                tid = leg.trade_id or f"{sym}_{leg.fill_time.isoformat()}"
+                self._kit.log_exit(
+                    trade_id=tid,
+                    exit_price=fill_price,
+                    exit_reason=reason,
+                )
 
         # M8: Remove position entirely instead of resetting to empty book
         self.positions.pop(sym, None)
