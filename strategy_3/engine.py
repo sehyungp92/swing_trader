@@ -1065,6 +1065,18 @@ class BreakoutEngine:
             current_stop=stop_price,
         )
 
+        # Filter decision telemetry
+        total_risk = sum(p.total_risk_dollars for p in self.positions.values() if p.qty > 0)
+        heat_actual = total_risk / self._equity if self._equity > 0 else 0
+        setup.filter_decisions = [
+            {"filter_name": "score_threshold", "threshold": ctx.get("score_threshold", 2),
+             "actual_value": ctx.get("score_total", 0), "passed": True,
+             "margin_pct": round((ctx.get("score_total", 0) - ctx.get("score_threshold", 2)) / max(ctx.get("score_threshold", 2), 0.01) * 100, 1)},
+            {"filter_name": "displacement", "threshold": ctx.get("disp_th", 0),
+             "actual_value": ctx.get("disp", 0), "passed": ctx.get("displacement_pass", True),
+             "margin_pct": round((ctx.get("disp", 0) - ctx.get("disp_th", 0)) / max(ctx.get("disp_th", 0), 0.01) * 100, 1) if ctx.get("disp_th", 0) > 0 else 0},
+        ]
+
         # Submit orders
         inst = self._instruments.get(symbol)
         if inst is None:
@@ -1753,6 +1765,24 @@ class BreakoutEngine:
 
                     # Hook 4: Instrumentation trade entry
                     if self._kit:
+                        campaign = self.campaigns.get(setup.symbol)
+                        ctx = campaign.daily_context if campaign else {}
+                        active_pos = {s: p for s, p in self.positions.items() if p.qty > 0}
+                        total_risk = sum(p.total_risk_dollars for p in active_pos.values())
+                        # Correlated pairs
+                        correlated = []
+                        for sym_b, pos_b in self.positions.items():
+                            if pos_b.qty <= 0 or sym_b == setup.symbol:
+                                continue
+                            pair_key = tuple(sorted([setup.symbol, sym_b]))
+                            corr = self.correlation_map.get(pair_key, 0.0)
+                            if abs(corr) > 0.5:
+                                correlated.append({
+                                    "symbol": sym_b,
+                                    "direction": "LONG" if pos_b.direction == Direction.LONG else "SHORT",
+                                    "correlation": round(corr, 3),
+                                    "same_direction": (pos_b.direction == setup.direction),
+                                })
                         self._kit.log_entry(
                             trade_id=setup.setup_id,
                             pair=setup.symbol,
@@ -1760,21 +1790,60 @@ class BreakoutEngine:
                             entry_price=setup.fill_price,
                             position_size=float(setup.fill_qty),
                             position_size_quote=setup.fill_price * setup.fill_qty,
-                            entry_signal=setup.entry_type.value if hasattr(setup.entry_type, 'value') else str(setup.entry_type),
+                            entry_signal=setup.entry_type.value if hasattr(setup.entry_type, "value") else str(setup.entry_type),
                             entry_signal_id=setup.setup_id,
-                            entry_signal_strength=setup.quality_mult if hasattr(setup, 'quality_mult') else 0.5,
-                            active_filters=[],
-                            passed_filters=[],
-                            strategy_params={"final_risk_dollars": setup.final_risk_dollars},
+                            entry_signal_strength=setup.quality_mult if hasattr(setup, "quality_mult") else 0.5,
+                            active_filters=["score_threshold", "displacement", "eligibility"],
+                            passed_filters=["score_threshold", "displacement", "eligibility"],
+                            filter_decisions=setup.filter_decisions if hasattr(setup, "filter_decisions") else [],
+                            strategy_params={
+                                "final_risk_dollars": setup.final_risk_dollars,
+                                "entry_type": setup.entry_type.value if hasattr(setup.entry_type, "value") else str(setup.entry_type),
+                                "quality_mult": setup.quality_mult,
+                                "score_total": ctx.get("score_total"),
+                                "score_threshold": ctx.get("score_threshold"),
+                                "regime_4h": ctx.get("regime_4h").value if ctx.get("regime_4h") and hasattr(ctx["regime_4h"], "value") else str(ctx.get("regime_4h")),
+                                "trade_regime": str(ctx.get("trade_regime")),
+                                "chop_mode": ctx.get("chop_mode"),
+                                "atr14_d": ctx.get("atr14_d"),
+                                "risk_regime": ctx.get("risk_regime"),
+                                "cb_mult": ctx.get("cb_mult"),
+                                "expiry_mult": ctx.get("expiry_mult"),
+                                "base_risk_pct": self._base_risk_pct if hasattr(self, "_base_risk_pct") else 0.01,
+                            },
                             expected_entry_price=setup.fill_price,
+                            signal_factors=[
+                                {"factor_name": "score_total", "factor_value": ctx.get("score_total", 0),
+                                 "threshold": ctx.get("score_threshold", 2), "contribution": "evidence_quality"},
+                                {"factor_name": "score_vol", "factor_value": ctx.get("score_vol", 0),
+                                 "threshold": 0, "contribution": "volume_confirmation"},
+                                {"factor_name": "score_squeeze", "factor_value": ctx.get("score_squeeze", 0),
+                                 "threshold": 0, "contribution": "compression_quality"},
+                                {"factor_name": "score_regime", "factor_value": ctx.get("score_regime", 0),
+                                 "threshold": 0, "contribution": "regime_alignment"},
+                                {"factor_name": "score_consec", "factor_value": ctx.get("score_consec", 0),
+                                 "threshold": 0, "contribution": "consecutive_closes"},
+                                {"factor_name": "displacement", "factor_value": ctx.get("disp", 0),
+                                 "threshold": ctx.get("disp_th", 0), "contribution": "breakout_magnitude"},
+                                {"factor_name": "quality_mult", "factor_value": ctx.get("quality_mult", 0),
+                                 "threshold": 0.25, "contribution": "composite_sizing_quality"},
+                            ],
                             sizing_inputs={
-                                "target_risk_pct": self._base_risk_pct if hasattr(self, '_base_risk_pct') else 0.01,
-                                "account_equity": self._equity if hasattr(self, '_equity') else 0.0,
+                                "target_risk_pct": self._base_risk_pct if hasattr(self, "_base_risk_pct") else 0.01,
+                                "account_equity": self._equity if hasattr(self, "_equity") else 0.0,
                                 "volatility_basis": setup.final_risk_dollars,
                                 "sizing_model": "breakout_r_risk",
                             },
-                                                    concurrent_positions_strategy=len(self.active_setups),
-)
+                            portfolio_state_at_entry={
+                                "num_positions": len(active_pos),
+                                "total_risk_dollars": round(total_risk, 2),
+                                "total_exposure_pct": round(total_risk / self._equity, 4) if self._equity > 0 else 0,
+                                "long_positions": sum(1 for p in active_pos.values() if p.direction == Direction.LONG),
+                                "short_positions": sum(1 for p in active_pos.values() if p.direction == Direction.SHORT),
+                            },
+                            correlated_pairs_detail=correlated if correlated else None,
+                            concurrent_positions_strategy=len(self.active_setups),
+                        )
 
                     # Submit bracket orders (stop + TP) for position protection
                     await self._submit_bracket_orders(setup)

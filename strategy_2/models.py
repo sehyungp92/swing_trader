@@ -230,6 +230,9 @@ class SetupInstance:
     # Recording
     trade_id: str = ""
 
+    # Gate decision telemetry (populated at arm time)
+    gate_decisions: list = field(default_factory=list)
+
 
 # ---------------------------------------------------------------------------
 # CircuitBreakerState

@@ -387,6 +387,16 @@ class KeltnerEngine:
             self._pending_entry[symbol] = {
                 "direction": direction,
                 "stop_dist": stop_dist,
+                # Carry-forward for enriched telemetry
+                "rsi": state.rsi,
+                "roc": state.roc,
+                "kelt_upper": state.kelt_upper,
+                "kelt_middle": state.kelt_middle,
+                "kelt_lower": state.kelt_lower,
+                "volume": state.volume,
+                "volume_sma": state.volume_sma,
+                "atr": state.atr,
+                "close": state.close,
             }
             logger.info(
                 "%s: %s entry %s submitted — qty=%d, est_stop=%.2f",
@@ -664,6 +674,8 @@ class KeltnerEngine:
             # Hook 4: Instrumentation trade entry
             if self._kit:
                 side_str = "LONG" if direction == Direction.LONG else "SHORT"
+                pending = ctx  # ctx was popped from _pending_entry
+                vol_ratio = pending.get("volume", 0) / pending.get("volume_sma", 1) if pending.get("volume_sma", 0) > 0 else 0
                 self._kit.log_entry(
                     trade_id=f"{symbol}_{pos.entry_time.isoformat()}",
                     pair=symbol,
@@ -674,18 +686,55 @@ class KeltnerEngine:
                     entry_signal="keltner_breakout",
                     entry_signal_id=f"{symbol}_kelt_{pos.entry_time.isoformat()}",
                     entry_signal_strength=0.5,
-                    active_filters=[],
-                    passed_filters=[],
-                    strategy_params={"stop_dist": stop_dist, "r_price": r_price},
+                    active_filters=["volume_filter", "rsi_threshold"],
+                    passed_filters=["volume_filter", "rsi_threshold"],
+                    filter_decisions=[
+                        {"filter_name": "volume_filter", "threshold": pending.get("volume_sma", 0),
+                         "actual_value": pending.get("volume", 0), "passed": True,
+                         "margin_pct": round((vol_ratio - 1.0) * 100, 1) if vol_ratio > 0 else 0},
+                        {"filter_name": "rsi_threshold",
+                         "threshold": cfg.rsi_entry_long if direction == Direction.LONG else cfg.rsi_entry_short,
+                         "actual_value": pending.get("rsi", 50), "passed": True,
+                         "margin_pct": 0},
+                    ],
+                    strategy_params={
+                        "stop_dist": stop_dist,
+                        "r_price": r_price,
+                        "kelt_ema_period": cfg.kelt_ema_period,
+                        "kelt_atr_mult": cfg.kelt_atr_mult,
+                        "rsi_period": cfg.rsi_period,
+                        "roc_period": cfg.roc_period,
+                        "atr_stop_mult": cfg.atr_stop_mult,
+                        "entry_mode": cfg.entry_mode,
+                        "base_risk_pct": cfg.base_risk_pct,
+                        "rsi_at_entry": pending.get("rsi"),
+                        "roc_at_entry": pending.get("roc"),
+                        "atr_at_entry": pending.get("atr"),
+                    },
                     expected_entry_price=fill_price,
+                    signal_factors=[
+                        {"factor_name": "rsi", "factor_value": pending.get("rsi", 50),
+                         "threshold": cfg.rsi_entry_long if direction == Direction.LONG else cfg.rsi_entry_short,
+                         "contribution": "momentum_filter"},
+                        {"factor_name": "roc", "factor_value": pending.get("roc", 0),
+                         "threshold": 0.0, "contribution": "rate_of_change"},
+                        {"factor_name": "volume_ratio", "factor_value": round(vol_ratio, 2),
+                         "threshold": 1.0, "contribution": "volume_confirmation"},
+                        {"factor_name": "entry_mode", "factor_value": cfg.entry_mode,
+                         "threshold": "breakout", "contribution": "signal_type"},
+                    ],
                     sizing_inputs={
-                        "target_risk_pct": self._config[symbol].base_risk_pct,
+                        "target_risk_pct": cfg.base_risk_pct,
                         "account_equity": self._equity,
                         "volatility_basis": stop_dist,
                         "sizing_model": "keltner_atr",
                     },
-                                    concurrent_positions_strategy=len(self.positions),
-)
+                    portfolio_state_at_entry={
+                        "num_positions": len(self.positions),
+                        "symbols_held": list(self.positions.keys()),
+                    },
+                    concurrent_positions_strategy=len(self.positions),
+                )
 
             # Submit protective stop
             await self._submit_protective_stop(symbol, pos)

@@ -47,6 +47,7 @@ backtest/output/*.txt
 # Logs
 *.log
 logs/
+docs/
 
 # Next.js dashboard
 infra/dashboard/.next/

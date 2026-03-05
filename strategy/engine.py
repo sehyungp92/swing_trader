@@ -991,6 +991,9 @@ class ATRSSEngine:
 
         receipt = await self._oms.submit_intent(intent)
         if receipt.oms_order_id:
+            daily = self.daily_states.get(candidate.symbol)
+            hourly = self.hourly_states.get(candidate.symbol)
+            cfg_snap = self._config.get(candidate.symbol)
             self.pending_orders[receipt.oms_order_id] = {
                 "symbol": candidate.symbol,
                 "type": candidate.type,
@@ -999,6 +1002,23 @@ class ATRSSEngine:
                 "initial_stop": candidate.initial_stop,
                 "qty": candidate.qty,
                 "submitted_at": datetime.now(timezone.utc),
+                # Carry-forward for enriched telemetry
+                "quality_score": candidate.rank_score,
+                "daily_regime": daily.regime.value if daily else "unknown",
+                "daily_adx": daily.adx if daily else 0,
+                "daily_trend_dir": daily.trend_dir.name if daily else "FLAT",
+                "daily_ema_sep_pct": daily.ema_sep_pct if daily else 0,
+                "daily_plus_di": daily.plus_di if daily else 0,
+                "daily_minus_di": daily.minus_di if daily else 0,
+                "daily_mult": cfg_snap.daily_mult if cfg_snap else 0,
+                "hourly_mult": cfg_snap.hourly_mult if cfg_snap else 0,
+                "chand_mult": cfg_snap.chand_mult if cfg_snap else 0,
+                "base_risk_pct": cfg_snap.base_risk_pct if cfg_snap else 0.01,
+                "adx_on": cfg_snap.adx_on if cfg_snap else 20,
+                "adx_off": cfg_snap.adx_off if cfg_snap else 18,
+                "hourly_close": hourly.close if hourly else 0,
+                "hourly_ema_mom": hourly.ema_mom if hourly else 0,
+                "hourly_atrh": hourly.atrh if hourly else 0,
             }
             # Consume voucher if this is a same-direction re-entry (spec Section 4.2)
             reentry = self.reentry_states.get(candidate.symbol)
@@ -1457,6 +1477,9 @@ class ATRSSEngine:
             # Hook 4: Instrumentation trade entry
             if self._kit:
                 side_str = "LONG" if direction == Direction.LONG else "SHORT"
+                active_pos = {s: p for s, p in self.positions.items() if p.direction != Direction.FLAT}
+                quality_score = meta.get("quality_score", 0)
+                quality_margin = (quality_score - QUALITY_GATE_THRESHOLD) / max(QUALITY_GATE_THRESHOLD, 0.01) * 100 if QUALITY_GATE_THRESHOLD > 0 else 0
                 self._kit.log_entry(
                     trade_id=trade_id or f"{sym}_{fill_time.isoformat()}",
                     pair=sym,
@@ -1467,19 +1490,52 @@ class ATRSSEngine:
                     entry_signal=ctype.value,
                     entry_signal_id=f"{sym}_{ctype.value}_{fill_time.isoformat()}",
                     entry_signal_strength=meta.get("quality_score", 0.5),
-                    active_filters=["quality_gate", "momentum", "reentry"],
-                    passed_filters=["quality_gate"],
-                    strategy_params={"atrh": atrh, "stop": meta["initial_stop"]},
+                    active_filters=["quality_gate", "momentum", "portfolio_heat"],
+                    passed_filters=["quality_gate", "momentum", "portfolio_heat"],
+                    filter_decisions=[
+                        {"filter_name": "quality_gate", "threshold": QUALITY_GATE_THRESHOLD,
+                         "actual_value": quality_score, "passed": True,
+                         "margin_pct": round(quality_margin, 1)},
+                        {"filter_name": "momentum", "threshold": 0,
+                         "actual_value": meta.get("hourly_ema_mom", 0), "passed": True,
+                         "margin_pct": 0},
+                    ],
+                    strategy_params={
+                        "atrh": atrh,
+                        "initial_stop": meta["initial_stop"],
+                        "daily_mult": meta.get("daily_mult"),
+                        "hourly_mult": meta.get("hourly_mult"),
+                        "chand_mult": meta.get("chand_mult"),
+                        "base_risk_pct": meta.get("base_risk_pct"),
+                        "quality_gate_threshold": QUALITY_GATE_THRESHOLD,
+                        "adx_on": meta.get("adx_on"),
+                        "adx_off": meta.get("adx_off"),
+                        "regime": meta.get("daily_regime"),
+                    },
                     expected_entry_price=meta["trigger_price"],
                     signal_factors=[
                         {"factor_name": "quality_score", "factor_value": meta.get("quality_score", 0),
                          "threshold": QUALITY_GATE_THRESHOLD, "contribution": "entry_quality"},
+                        {"factor_name": "adx", "factor_value": meta.get("daily_adx", 0),
+                         "threshold": meta.get("adx_on", 20), "contribution": "trend_strength"},
+                        {"factor_name": "ema_separation", "factor_value": meta.get("daily_ema_sep_pct", 0),
+                         "threshold": 0.15, "contribution": "trend_separation"},
+                        {"factor_name": "regime", "factor_value": meta.get("daily_regime", "unknown"),
+                         "threshold": "TREND", "contribution": "regime_context"},
+                        {"factor_name": "signal_type", "factor_value": ctype.value,
+                         "threshold": "pullback", "contribution": "entry_type"},
                     ],
                     sizing_inputs={
                         "target_risk_pct": cfg.base_risk_pct,
                         "account_equity": self._equity,
                         "volatility_basis": atrh,
                         "sizing_model": "atr_risk",
+                    },
+                    portfolio_state_at_entry={
+                        "num_positions": len(active_pos),
+                        "long_positions": sum(1 for p in active_pos.values() if p.direction == Direction.LONG),
+                        "short_positions": sum(1 for p in active_pos.values() if p.direction == Direction.SHORT),
+                        "symbols_held": list(active_pos.keys()),
                     },
                     concurrent_positions_strategy=len(self.positions),
                 )

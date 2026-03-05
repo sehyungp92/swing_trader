@@ -67,6 +67,7 @@ from .config import (
     TTL_4H_HOURS,
     TTL_ADD_HOURS,
     WEEKLY_STOP_R,
+    PORTFOLIO_CAP_R,
     SymbolConfig,
 )
 from .indicators import (
@@ -920,6 +921,16 @@ class HelixEngine:
         if not ok:
             logger.info("Setup %s %s blocked by gate: %s", setup.symbol, setup.setup_id[:8], reason)
             return
+
+        # Record gate decisions for telemetry
+        setup.gate_decisions = [
+            {"filter_name": "spread_gate", "threshold": getattr(cfg, 'max_spread_ticks', 0),
+             "actual_value": spread_ticks, "passed": True,
+             "margin_pct": round((getattr(cfg, 'max_spread_ticks', spread_ticks) - spread_ticks) / max(getattr(cfg, 'max_spread_ticks', 1), 0.01) * 100, 1)},
+            {"filter_name": "heat_cap", "threshold": PORTFOLIO_CAP_R,
+             "actual_value": round(portfolio_r + pending_r, 2), "passed": True,
+             "margin_pct": round((PORTFOLIO_CAP_R - (portfolio_r + pending_r)) / max(PORTFOLIO_CAP_R, 0.01) * 100, 1)},
+        ]
 
         # Assign OCA group
         self._oca_counter += 1
@@ -2017,6 +2028,19 @@ class HelixEngine:
         # Hook 4: Instrumentation trade entry
         if self._kit:
             side_str = "LONG" if setup.direction == Direction.LONG else "SHORT"
+            active = {sid: s for sid, s in self.active_setups.items() if s.state in (SetupState.FILLED, SetupState.ACTIVE)}
+            # Correlated pairs (basket peers)
+            from .config import BASKET_SYMBOLS
+            correlated = []
+            if setup.symbol in BASKET_SYMBOLS:
+                for sid, peer in active.items():
+                    if peer.symbol in BASKET_SYMBOLS and peer.symbol != setup.symbol:
+                        correlated.append({
+                            "symbol": peer.symbol,
+                            "direction": "LONG" if peer.direction == Direction.LONG else "SHORT",
+                            "relationship": "basket_peer",
+                            "same_direction": (peer.direction == setup.direction),
+                        })
             self._kit.log_entry(
                 trade_id=setup.trade_id or setup.setup_id,
                 pair=setup.symbol,
@@ -2027,18 +2051,32 @@ class HelixEngine:
                 entry_signal=setup.setup_class.value,
                 entry_signal_id=setup.setup_id,
                 entry_signal_strength=0.5,
-                active_filters=[],
-                passed_filters=[],
+                active_filters=["spread_gate", "heat_cap"],
+                passed_filters=["spread_gate", "heat_cap"],
+                filter_decisions=setup.gate_decisions,
                 strategy_params={
                     "adx_at_entry": setup.adx_at_entry,
                     "regime_4h": setup.regime_4h_at_entry,
                     "size_mult": setup.setup_size_mult,
+                    "setup_class": setup.setup_class.value,
+                    "origin_tf": setup.origin_tf,
+                    "div_mag_norm": setup.div_mag_norm,
+                    "vol_factor": setup.vol_factor_at_placement,
+                    "bos_level": setup.bos_level,
+                    "stop0": setup.stop0,
+                    "base_risk_pct": self._base_risk_pct if hasattr(self, '_base_risk_pct') else 0.01,
+                    "r_price": setup.r_price,
+                    "unit1_risk_dollars": setup.unit1_risk_dollars,
                 },
                 expected_entry_price=setup.bos_level,
                 signal_factors=[
                     {"factor_name": "adx", "factor_value": setup.adx_at_entry, "threshold": 20.0, "contribution": "trend_strength"},
                     {"factor_name": "setup_class", "factor_value": setup.setup_class.value, "threshold": "CLASS_A", "contribution": "setup_quality"},
                     {"factor_name": "size_mult", "factor_value": setup.setup_size_mult, "threshold": 0.5, "contribution": "conviction"},
+                    {"factor_name": "div_mag_norm", "factor_value": setup.div_mag_norm, "threshold": 0.5, "contribution": "divergence_magnitude"},
+                    {"factor_name": "vol_factor", "factor_value": setup.vol_factor_at_placement, "threshold": 1.0, "contribution": "volatility_regime"},
+                    {"factor_name": "regime_4h", "factor_value": setup.regime_4h_at_entry or "unknown", "threshold": "BULL", "contribution": "higher_tf_regime"},
+                    {"factor_name": "origin_tf", "factor_value": setup.origin_tf, "threshold": "4H", "contribution": "timeframe_origin"},
                 ],
                 sizing_inputs={
                     "target_risk_pct": self._base_risk_pct if hasattr(self, '_base_risk_pct') else 0.01,
@@ -2046,8 +2084,13 @@ class HelixEngine:
                     "volatility_basis": setup.adx_at_entry,
                     "sizing_model": "helix_class_mult",
                 },
-                            concurrent_positions_strategy=len(self.active_setups),
-)
+                portfolio_state_at_entry={
+                    "num_positions": len(active),
+                    "symbols_held": [s.symbol for s in active.values()],
+                },
+                correlated_pairs_detail=correlated if correlated else None,
+                concurrent_positions_strategy=len(self.active_setups),
+            )
 
     async def _on_stop_fill(self, oms_order_id: str, payload: dict) -> None:
         """Handle a stop-loss fill — record exit, update circuit breaker."""

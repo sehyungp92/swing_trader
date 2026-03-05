@@ -313,6 +313,9 @@ class SetupInstance:
     gap_stop_event: bool = False
     gap_stop_fill_price: Optional[float] = None
 
+    # Filter decision telemetry (populated at entry time)
+    filter_decisions: list = field(default_factory=list)
+
 
 # ---------------------------------------------------------------------------
 # Position State
