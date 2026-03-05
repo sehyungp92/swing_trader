@@ -137,6 +137,10 @@ class BreakoutEngine:
         self._market_cal = market_calendar
         self._kit = instrumentation
 
+        # Wire drawdown tracker with initial equity
+        if self._kit and self._kit.ctx and self._kit.ctx.drawdown_tracker:
+            self._kit.ctx.drawdown_tracker.update_equity(self._equity)
+
         # Per-symbol campaign state
         self.campaigns: dict[str, SymbolCampaign] = {
             sym: SymbolCampaign() for sym in self._config
@@ -1569,10 +1573,25 @@ class BreakoutEngine:
 
         # Hook 5: Instrumentation trade exit + process scoring
         if self._kit:
+            if setup.direction == Direction.LONG:
+                _mfe_pct = (setup.mfe_price - setup.fill_price) / setup.fill_price if setup.fill_price > 0 else None
+                _mae_pct = (setup.fill_price - setup.mae_price) / setup.fill_price if setup.fill_price > 0 else None
+                _pnl_pct = (exit_price - setup.fill_price) / setup.fill_price if setup.fill_price > 0 else None
+            else:
+                _mfe_pct = (setup.fill_price - setup.mfe_price) / setup.fill_price if setup.fill_price > 0 else None
+                _mae_pct = (setup.mae_price - setup.fill_price) / setup.fill_price if setup.fill_price > 0 else None
+                _pnl_pct = (setup.fill_price - exit_price) / setup.fill_price if setup.fill_price > 0 else None
             self._kit.log_exit(
                 trade_id=setup.setup_id,
                 exit_price=exit_price,
                 exit_reason=reason,
+                mfe_price=setup.mfe_price,
+                mae_price=setup.mae_price,
+                mfe_r=setup.mfe_r,
+                mae_r=setup.mae_r,
+                mfe_pct=_mfe_pct,
+                mae_pct=_mae_pct,
+                pnl_pct=_pnl_pct,
             )
 
         logger.info("%s: Position closed — reason=%s, R=%.2f", setup.symbol, reason, setup.r_state)
@@ -1754,7 +1773,8 @@ class BreakoutEngine:
                                 "volatility_basis": setup.final_risk_dollars,
                                 "sizing_model": "breakout_r_risk",
                             },
-                        )
+                                                    concurrent_positions_strategy=len(self.active_setups),
+)
 
                     # Submit bracket orders (stop + TP) for position protection
                     await self._submit_bracket_orders(setup)
@@ -1780,6 +1800,8 @@ class BreakoutEngine:
                 for item in summary:
                     if item.tag == "NetLiquidation" and item.currency == "USD":
                         self._equity = float(item.value)
+                        if self._kit and self._kit.ctx and self._kit.ctx.drawdown_tracker:
+                            self._kit.ctx.drawdown_tracker.update_equity(self._equity)
                         return
         except Exception:
             logger.warning("Could not refresh equity, using $%.2f", self._equity)

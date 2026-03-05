@@ -92,6 +92,10 @@ class KeltnerEngine:
         self._market_cal = market_calendar
         self._kit = kit
 
+        # Wire drawdown tracker with initial equity
+        if self._kit and self._kit.ctx and self._kit.ctx.drawdown_tracker:
+            self._kit.ctx.drawdown_tracker.update_equity(self._equity)
+
         # Per-symbol state
         self.positions: dict[str, _LivePosition] = {}
         self._pending_entry: dict[str, dict] = {}  # sym -> {direction, stop_dist}
@@ -680,7 +684,8 @@ class KeltnerEngine:
                         "volatility_basis": stop_dist,
                         "sizing_model": "keltner_atr",
                     },
-                )
+                                    concurrent_positions_strategy=len(self.positions),
+)
 
             # Submit protective stop
             await self._submit_protective_stop(symbol, pos)
@@ -696,7 +701,27 @@ class KeltnerEngine:
                 # Hook 5: Instrumentation trade exit + process scoring
                 if self._kit:
                     tid = f"{symbol}_{pos.entry_time.isoformat()}"
-                    self._kit.log_exit(trade_id=tid, exit_price=fill_price, exit_reason="STOP_LOSS")
+                    # Compute MFE/MAE metrics
+                    if pos.direction == Direction.LONG:
+                        _mfe_pct = (pos.mfe_price - pos.fill_price) / pos.fill_price if pos.fill_price > 0 else None
+                        _mae_pct = (pos.fill_price - pos.mae_price) / pos.fill_price if pos.fill_price > 0 else None
+                        _pnl_pct = (fill_price - pos.fill_price) / pos.fill_price if pos.fill_price > 0 else None
+                        _mfe_r = (pos.mfe_price - pos.fill_price) / pos.r_price if pos.r_price > 0 else None
+                        _mae_r = (pos.fill_price - pos.mae_price) / pos.r_price if pos.r_price > 0 else None
+                    else:
+                        _mfe_pct = (pos.fill_price - pos.mfe_price) / pos.fill_price if pos.fill_price > 0 else None
+                        _mae_pct = (pos.mae_price - pos.fill_price) / pos.fill_price if pos.fill_price > 0 else None
+                        _pnl_pct = (pos.fill_price - fill_price) / pos.fill_price if pos.fill_price > 0 else None
+                        _mfe_r = (pos.fill_price - pos.mfe_price) / pos.r_price if pos.r_price > 0 else None
+                        _mae_r = (pos.mae_price - pos.fill_price) / pos.r_price if pos.r_price > 0 else None
+                    self._kit.log_exit(
+                        trade_id=tid, exit_price=fill_price,
+                        exit_reason="STOP_LOSS",
+                        mfe_price=pos.mfe_price, mae_price=pos.mae_price,
+                        mfe_r=_mfe_r, mae_r=_mae_r,
+                        mfe_pct=_mfe_pct, mae_pct=_mae_pct,
+                        pnl_pct=_pnl_pct,
+                    )
 
         elif role == "signal_exit":
             pos = self.positions.pop(symbol, None)
@@ -709,7 +734,27 @@ class KeltnerEngine:
                 # Hook 5: Instrumentation trade exit + process scoring
                 if self._kit:
                     tid = f"{symbol}_{pos.entry_time.isoformat()}"
-                    self._kit.log_exit(trade_id=tid, exit_price=fill_price, exit_reason="SIGNAL")
+                    # Compute MFE/MAE metrics
+                    if pos.direction == Direction.LONG:
+                        _mfe_pct = (pos.mfe_price - pos.fill_price) / pos.fill_price if pos.fill_price > 0 else None
+                        _mae_pct = (pos.fill_price - pos.mae_price) / pos.fill_price if pos.fill_price > 0 else None
+                        _pnl_pct = (fill_price - pos.fill_price) / pos.fill_price if pos.fill_price > 0 else None
+                        _mfe_r = (pos.mfe_price - pos.fill_price) / pos.r_price if pos.r_price > 0 else None
+                        _mae_r = (pos.fill_price - pos.mae_price) / pos.r_price if pos.r_price > 0 else None
+                    else:
+                        _mfe_pct = (pos.fill_price - pos.mfe_price) / pos.fill_price if pos.fill_price > 0 else None
+                        _mae_pct = (pos.mae_price - pos.fill_price) / pos.fill_price if pos.fill_price > 0 else None
+                        _pnl_pct = (pos.fill_price - fill_price) / pos.fill_price if pos.fill_price > 0 else None
+                        _mfe_r = (pos.fill_price - pos.mfe_price) / pos.r_price if pos.r_price > 0 else None
+                        _mae_r = (pos.mae_price - pos.fill_price) / pos.r_price if pos.r_price > 0 else None
+                    self._kit.log_exit(
+                        trade_id=tid, exit_price=fill_price,
+                        exit_reason="SIGNAL",
+                        mfe_price=pos.mfe_price, mae_price=pos.mae_price,
+                        mfe_r=_mfe_r, mae_r=_mae_r,
+                        mfe_pct=_mfe_pct, mae_pct=_mae_pct,
+                        pnl_pct=_pnl_pct,
+                    )
 
         # Cleanup order tracking
         self._order_to_symbol.pop(oms_order_id, None)
@@ -789,6 +834,8 @@ class KeltnerEngine:
                 for item in summary:
                     if item.tag == "NetLiquidation" and item.currency == "USD":
                         self._equity = float(item.value)
+                        if self._kit and self._kit.ctx and self._kit.ctx.drawdown_tracker:
+                            self._kit.ctx.drawdown_tracker.update_equity(self._equity)
                         return
         except Exception:
             logger.warning("%s: Could not refresh equity, using $%.2f",

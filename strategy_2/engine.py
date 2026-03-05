@@ -160,6 +160,10 @@ class HelixEngine:
         self._market_cal = market_calendar
         self._kit = instrumentation_kit
 
+        # Wire drawdown tracker with initial equity
+        if self._kit and self._kit.ctx and self._kit.ctx.drawdown_tracker:
+            self._kit.ctx.drawdown_tracker.update_equity(self._equity)
+
         # Per-symbol state
         self.daily_states: dict[str, DailyState] = {}
         self.tf_states: dict[str, dict[str, TFState]] = {}    # sym → {"1H": ..., "4H": ...}
@@ -405,6 +409,8 @@ class HelixEngine:
                         new_equity = float(item.value)
                         if new_equity > 0:
                             self._equity = new_equity
+                            if self._kit and self._kit.ctx and self._kit.ctx.drawdown_tracker:
+                                self._kit.ctx.drawdown_tracker.update_equity(new_equity)
                             logger.debug("Equity updated to $%.2f", new_equity)
                         return
         except Exception:
@@ -1741,10 +1747,28 @@ class HelixEngine:
             # Use last known price as exit price estimate
             current_price = self._get_current_price(setup.symbol)
             exit_price = current_price if current_price > 0 else setup.fill_price
+            # Compute MFE/MAE prices from R values
+            if setup.direction == Direction.LONG:
+                _mfe_price = setup.fill_price + setup.mfe_r_peak * setup.r_price if setup.r_price > 0 else setup.fill_price
+                _mae_price = setup.fill_price + setup.mae_r_trough * setup.r_price if setup.r_price > 0 else setup.fill_price
+                _pnl_pct = (exit_price - setup.fill_price) / setup.fill_price if setup.fill_price > 0 else None
+            else:
+                _mfe_price = setup.fill_price - setup.mfe_r_peak * setup.r_price if setup.r_price > 0 else setup.fill_price
+                _mae_price = setup.fill_price - setup.mae_r_trough * setup.r_price if setup.r_price > 0 else setup.fill_price
+                _pnl_pct = (setup.fill_price - exit_price) / setup.fill_price if setup.fill_price > 0 else None
+            _mfe_pct = abs(setup.mfe_r_peak * setup.r_price / setup.fill_price) if setup.fill_price > 0 and setup.r_price > 0 else None
+            _mae_pct = abs(setup.mae_r_trough * setup.r_price / setup.fill_price) if setup.fill_price > 0 and setup.r_price > 0 else None
             self._kit.log_exit(
                 trade_id=tid,
                 exit_price=exit_price,
                 exit_reason="FLATTEN",
+                mfe_price=_mfe_price,
+                mae_price=_mae_price,
+                mfe_r=setup.mfe_r_peak,
+                mae_r=setup.mae_r_trough,
+                mfe_pct=_mfe_pct,
+                mae_pct=_mae_pct,
+                pnl_pct=_pnl_pct,
             )
 
         setup.state = SetupState.CLOSED
@@ -2022,7 +2046,8 @@ class HelixEngine:
                     "volatility_basis": setup.adx_at_entry,
                     "sizing_model": "helix_class_mult",
                 },
-            )
+                            concurrent_positions_strategy=len(self.active_setups),
+)
 
     async def _on_stop_fill(self, oms_order_id: str, payload: dict) -> None:
         """Handle a stop-loss fill — record exit, update circuit breaker."""
@@ -2096,10 +2121,27 @@ class HelixEngine:
                 # Hook 5: Instrumentation trade exit + process scoring
                 if self._kit:
                     tid = setup.trade_id or setup.setup_id
+                    if setup.direction == Direction.LONG:
+                        _mfe_price = setup.fill_price + setup.mfe_r_peak * setup.r_price if setup.r_price > 0 else setup.fill_price
+                        _mae_price = setup.fill_price + setup.mae_r_trough * setup.r_price if setup.r_price > 0 else setup.fill_price
+                        _pnl_pct = (fill_price - setup.fill_price) / setup.fill_price if setup.fill_price > 0 else None
+                    else:
+                        _mfe_price = setup.fill_price - setup.mfe_r_peak * setup.r_price if setup.r_price > 0 else setup.fill_price
+                        _mae_price = setup.fill_price - setup.mae_r_trough * setup.r_price if setup.r_price > 0 else setup.fill_price
+                        _pnl_pct = (setup.fill_price - fill_price) / setup.fill_price if setup.fill_price > 0 else None
+                    _mfe_pct = abs(setup.mfe_r_peak * setup.r_price / setup.fill_price) if setup.fill_price > 0 and setup.r_price > 0 else None
+                    _mae_pct = abs(setup.mae_r_trough * setup.r_price / setup.fill_price) if setup.fill_price > 0 and setup.r_price > 0 else None
                     self._kit.log_exit(
                         trade_id=tid,
                         exit_price=fill_price,
                         exit_reason="STOP_LOSS",
+                        mfe_price=_mfe_price,
+                        mae_price=_mae_price,
+                        mfe_r=setup.mfe_r_peak,
+                        mae_r=setup.mae_r_trough,
+                        mfe_pct=_mfe_pct,
+                        mae_pct=_mae_pct,
+                        pnl_pct=_pnl_pct,
                     )
 
                 # Clean up

@@ -129,6 +129,10 @@ class ATRSSEngine:
         self._market_cal = market_calendar
         self._kit = kit
 
+        # Wire drawdown tracker with initial equity
+        if self._kit and self._kit.ctx and self._kit.ctx.drawdown_tracker:
+            self._kit.ctx.drawdown_tracker.update_equity(self._equity)
+
         # Per-symbol state
         self.daily_states: dict[str, DailyState] = {}
         self.hourly_states: dict[str, HourlyState] = {}
@@ -263,6 +267,8 @@ class ATRSSEngine:
                         new_equity = float(item.value)
                         if new_equity > 0:
                             self._equity = new_equity
+                            if self._kit and self._kit.ctx and self._kit.ctx.drawdown_tracker:
+                                self._kit.ctx.drawdown_tracker.update_equity(new_equity)
                             logger.debug("Equity updated to $%.2f", new_equity)
                         return
         except Exception:
@@ -1475,6 +1481,7 @@ class ATRSSEngine:
                         "volatility_basis": atrh,
                         "sizing_model": "atr_risk",
                     },
+                    concurrent_positions_strategy=len(self.positions),
                 )
 
         elif leg_type == LegType.ADDON_A:
@@ -1583,12 +1590,28 @@ class ATRSSEngine:
 
                 # Hook 5: Instrumentation trade exit + process scoring
                 if self._kit:
+                    _entry = pos.base_leg.entry_price if pos.base_leg else fill_price
+                    if pos.direction == Direction.LONG:
+                        _mfe_pct = (pos.mfe_price - _entry) / _entry if _entry > 0 else None
+                        _mae_pct = (_entry - pos.mae_price) / _entry if _entry > 0 else None
+                        _pnl_pct = (fill_price - _entry) / _entry if _entry > 0 else None
+                    else:
+                        _mfe_pct = (_entry - pos.mfe_price) / _entry if _entry > 0 else None
+                        _mae_pct = (pos.mae_price - _entry) / _entry if _entry > 0 else None
+                        _pnl_pct = (_entry - fill_price) / _entry if _entry > 0 else None
                     for leg in pos.legs:
                         tid = leg.trade_id or f"{sym}_{leg.fill_time.isoformat()}"
                         self._kit.log_exit(
                             trade_id=tid,
                             exit_price=fill_price,
                             exit_reason="STOP_LOSS",
+                            mfe_price=pos.mfe_price,
+                            mae_price=pos.mae_price,
+                            mfe_r=pos.mfe,
+                            mae_r=pos.mae,
+                            mfe_pct=_mfe_pct,
+                            mae_pct=_mae_pct,
+                            pnl_pct=_pnl_pct,
                         )
 
                 # M8: Remove position entirely instead of resetting to empty book
@@ -1653,12 +1676,28 @@ class ATRSSEngine:
 
         # Hook 5: Instrumentation trade exit + process scoring (flatten)
         if self._kit:
+            _entry = pos.base_leg.entry_price if pos.base_leg else fill_price
+            if pos.direction == Direction.LONG:
+                _mfe_pct = (pos.mfe_price - _entry) / _entry if _entry > 0 else None
+                _mae_pct = (_entry - pos.mae_price) / _entry if _entry > 0 else None
+                _pnl_pct = (fill_price - _entry) / _entry if _entry > 0 else None
+            else:
+                _mfe_pct = (_entry - pos.mfe_price) / _entry if _entry > 0 else None
+                _mae_pct = (pos.mae_price - _entry) / _entry if _entry > 0 else None
+                _pnl_pct = (_entry - fill_price) / _entry if _entry > 0 else None
             for leg in pos.legs:
                 tid = leg.trade_id or f"{sym}_{leg.fill_time.isoformat()}"
                 self._kit.log_exit(
                     trade_id=tid,
                     exit_price=fill_price,
                     exit_reason=reason,
+                    mfe_price=pos.mfe_price,
+                    mae_price=pos.mae_price,
+                    mfe_r=pos.mfe,
+                    mae_r=pos.mae,
+                    mfe_pct=_mfe_pct,
+                    mae_pct=_mae_pct,
+                    pnl_pct=_pnl_pct,
                 )
 
         # M8: Remove position entirely instead of resetting to empty book
