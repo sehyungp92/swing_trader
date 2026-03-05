@@ -219,6 +219,7 @@ class SetupInstance:
     bars_neg_fading_hist: int = 0
     # Stalled winner tracking: peak MFE in R and bar count when achieved
     mfe_r_peak: float = 0.0
+    mae_r_trough: float = 0.0
     bar_of_max_mfe: int = 0
 
     # R

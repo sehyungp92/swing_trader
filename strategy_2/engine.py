@@ -1326,6 +1326,10 @@ class HelixEngine:
             setup.mfe_r_peak = r_now
             setup.bar_of_max_mfe = setup.bars_held_1h
 
+        # Track trough MAE in R for adverse-excursion analysis
+        if r_now < setup.mae_r_trough:
+            setup.mae_r_trough = r_now
+
         # Per-class BE threshold: R_BE for 4H origin, R_BE_1H for 1H origin
         be_threshold = R_BE_1H if setup.origin_tf == "1H" else R_BE
 
