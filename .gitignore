@@ -54,6 +54,9 @@ infra/dashboard/.next/
 infra/dashboard/node_modules/
 infra/dashboard/.env.local
 
+# Local references & scratch
+_references/
+
 # OS
 .DS_Store
 Thumbs.db
