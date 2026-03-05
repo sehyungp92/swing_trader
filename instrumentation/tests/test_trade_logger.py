@@ -5,7 +5,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
-from instrumentation.src.trade_logger import TradeLogger
+from instrumentation.src.trade_logger import TradeLogger, TradeEvent
 from instrumentation.src.market_snapshot import MarketSnapshotService, MarketSnapshot
 
 
@@ -192,3 +192,31 @@ class TestTradeLogger:
         assert event.filter_decisions == fd
         assert event.sizing_inputs == si
         assert event.portfolio_state_at_entry == ps
+
+
+class TestTradeEventEnrichment:
+    def test_excursion_fields_default_none(self):
+        evt = TradeEvent(trade_id="test", event_metadata={}, entry_snapshot={})
+        assert evt.mfe_price is None
+        assert evt.mae_price is None
+        assert evt.mfe_pct is None
+        assert evt.mae_pct is None
+        assert evt.mfe_r is None
+        assert evt.mae_r is None
+        assert evt.exit_efficiency is None
+
+    def test_drawdown_fields_default_none(self):
+        evt = TradeEvent(trade_id="test", event_metadata={}, entry_snapshot={})
+        assert evt.drawdown_pct_at_entry is None
+        assert evt.drawdown_tier_at_entry is None
+        assert evt.position_size_multiplier is None
+
+    def test_session_gap_metadata_fields_default_none(self):
+        evt = TradeEvent(trade_id="test", event_metadata={}, entry_snapshot={})
+        assert evt.market_session is None
+        assert evt.minutes_into_session is None
+        assert evt.overnight_gap_pct is None
+        assert evt.prev_close_price is None
+        assert evt.experiment_id is None
+        assert evt.concurrent_positions_strategy is None
+        assert evt.correlated_pairs_detail is None

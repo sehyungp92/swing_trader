@@ -87,6 +87,33 @@ class TradeEvent:
     entry_latency_ms: Optional[int] = None
     exit_latency_ms: Optional[int] = None
 
+    # Excursion tracking (B5, B9)
+    mfe_price: Optional[float] = None
+    mae_price: Optional[float] = None
+    mfe_pct: Optional[float] = None
+    mae_pct: Optional[float] = None
+    mfe_r: Optional[float] = None
+    mae_r: Optional[float] = None
+    exit_efficiency: Optional[float] = None  # actual_pnl_pct / mfe_pct
+
+    # Drawdown context (B8)
+    drawdown_pct_at_entry: Optional[float] = None
+    drawdown_tier_at_entry: Optional[str] = None  # NORMAL/CAUTION/DANGER/HALT
+    position_size_multiplier: Optional[float] = None
+
+    # Session context (S4)
+    market_session: Optional[str] = None  # PRE/RTH/ETH_POST/WEEKEND
+    minutes_into_session: Optional[int] = None
+
+    # Overnight gap (B10)
+    overnight_gap_pct: Optional[float] = None
+    prev_close_price: Optional[float] = None
+
+    # Metadata (B11, S4)
+    experiment_id: Optional[str] = None
+    concurrent_positions_strategy: Optional[int] = None
+    correlated_pairs_detail: Optional[list] = None
+
     # Event stage
     stage: str = "entry"                    # "entry" or "exit"
 
