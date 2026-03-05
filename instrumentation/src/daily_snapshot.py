@@ -64,6 +64,12 @@ class DailySnapshot:
     # Regime breakdown
     regime_breakdown: Dict[str, dict] = field(default_factory=dict)
 
+    # Excursion & efficiency aggregates (Task 19)
+    avg_mfe_pct: Optional[float] = None
+    avg_mae_pct: Optional[float] = None
+    avg_exit_efficiency: Optional[float] = None
+    session_breakdown: Dict[str, dict] = field(default_factory=dict)
+
     # Execution quality
     avg_entry_slippage_bps: Optional[float] = None
     avg_exit_slippage_bps: Optional[float] = None
@@ -157,6 +163,30 @@ class DailySnapshotBuilder:
                 data["pnl"] = round(data["pnl"], 4)
                 data["win_rate"] = round(data["wins"] / data["trades"], 4) if data["trades"] > 0 else 0
             snapshot.regime_breakdown = regime_data
+
+            # Excursion & efficiency aggregates
+            mfe_pcts = [t.get("mfe_pct") for t in completed if t.get("mfe_pct") is not None]
+            mae_pcts = [t.get("mae_pct") for t in completed if t.get("mae_pct") is not None]
+            efficiencies = [t.get("exit_efficiency") for t in completed if t.get("exit_efficiency") is not None]
+
+            snapshot.avg_mfe_pct = round(sum(mfe_pcts) / len(mfe_pcts), 6) if mfe_pcts else None
+            snapshot.avg_mae_pct = round(sum(mae_pcts) / len(mae_pcts), 6) if mae_pcts else None
+            snapshot.avg_exit_efficiency = round(sum(efficiencies) / len(efficiencies), 4) if efficiencies else None
+
+            # Session breakdown
+            session_data: Dict[str, dict] = {}
+            for t in completed:
+                session = t.get("market_session", "unknown")
+                if session not in session_data:
+                    session_data[session] = {"trades": 0, "pnl": 0.0, "wins": 0}
+                session_data[session]["trades"] += 1
+                session_data[session]["pnl"] += t["pnl"]
+                if t["pnl"] > 0:
+                    session_data[session]["wins"] += 1
+            for data in session_data.values():
+                data["pnl"] = round(data["pnl"], 4)
+                data["win_rate"] = round(data["wins"] / data["trades"], 4) if data["trades"] > 0 else 0
+            snapshot.session_breakdown = session_data
 
         # --- MISSED OPPORTUNITIES ---
         snapshot.missed_count = len(missed)

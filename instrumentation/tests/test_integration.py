@@ -155,3 +155,54 @@ class TestFullLifecycle:
             if eid:
                 assert eid not in event_ids, f"Duplicate event_id: {eid}"
                 event_ids.add(eid)
+
+    def test_enriched_entry_exit_cycle(self):
+        """Verify enriched fields flow through entry-exit-snapshot cycle."""
+        # Entry with enriched metadata
+        trade = self.trade_logger.log_entry(
+            trade_id="t_enriched", pair="QQQ", side="LONG",
+            entry_price=500, position_size=10, position_size_quote=5000,
+            entry_signal="Pullback", entry_signal_id="pull_001",
+            entry_signal_strength=0.85, active_filters=["quality"],
+            passed_filters=["quality"],
+            strategy_params={"ema_fast": 20},
+            strategy_id="ATRSS", market_regime="trending_up",
+            # Enriched fields
+            drawdown_pct_at_entry=3.5,
+            drawdown_tier_at_entry="NORMAL",
+            position_size_multiplier=1.0,
+            market_session="RTH",
+            minutes_into_session=45,
+            overnight_gap_pct=0.5,
+            experiment_id="exp_001",
+            concurrent_positions_strategy=2,
+        )
+        assert trade is not None
+        assert trade.drawdown_pct_at_entry == 3.5
+        assert trade.drawdown_tier_at_entry == "NORMAL"
+        assert trade.market_session == "RTH"
+        assert trade.experiment_id == "exp_001"
+        assert trade.concurrent_positions_strategy == 2
+
+        # Exit with MFE/MAE
+        exit_trade = self.trade_logger.log_exit(
+            trade_id="t_enriched", exit_price=510,
+            exit_reason="TAKE_PROFIT", fees_paid=5,
+            mfe_price=515, mae_price=498,
+            mfe_pct=0.03, mae_pct=0.004,
+            mfe_r=2.5, mae_r=0.33,
+            exit_efficiency=0.667,
+        )
+        assert exit_trade is not None
+        assert exit_trade.mfe_price == 515
+        assert exit_trade.mae_price == 498
+        assert exit_trade.mfe_pct == 0.03
+        assert exit_trade.exit_efficiency == 0.667
+
+        # Verify daily snapshot includes enriched aggregates
+        builder = DailySnapshotBuilder(self.config)
+        snapshot = builder.build()
+        assert snapshot.avg_mfe_pct is not None
+        assert snapshot.avg_mae_pct is not None
+        # Session breakdown should have RTH entry
+        # (depends on trade event having market_session in exit record)

@@ -114,3 +114,32 @@ class TestDailySnapshot:
         ])
         snap = self.builder.build(self.today)
         assert snap.profit_factor == 3.0
+
+    def test_excursion_and_session_aggregates(self):
+        self._write_trades([
+            {"stage": "exit", "trade_id": "t1", "pnl": 100,
+             "mfe_pct": 0.05, "mae_pct": 0.01, "exit_efficiency": 0.8,
+             "market_session": "RTH"},
+            {"stage": "exit", "trade_id": "t2", "pnl": -50,
+             "mfe_pct": 0.02, "mae_pct": 0.03, "exit_efficiency": -1.0,
+             "market_session": "RTH"},
+            {"stage": "exit", "trade_id": "t3", "pnl": 200,
+             "mfe_pct": 0.08, "mae_pct": 0.005, "exit_efficiency": 0.9,
+             "market_session": "ETH_POST"},
+        ])
+        snap = self.builder.build(self.today)
+        assert snap.avg_mfe_pct is not None
+        assert snap.avg_mae_pct is not None
+        assert snap.avg_exit_efficiency is not None
+        assert abs(snap.avg_mfe_pct - 0.05) < 0.001
+        assert abs(snap.avg_mae_pct - 0.015) < 0.001
+        assert "RTH" in snap.session_breakdown
+        assert snap.session_breakdown["RTH"]["trades"] == 2
+        assert snap.session_breakdown["ETH_POST"]["trades"] == 1
+
+    def test_snapshot_new_fields_default_none(self):
+        snap = self.builder.build(self.today)
+        assert snap.avg_mfe_pct is None
+        assert snap.avg_mae_pct is None
+        assert snap.avg_exit_efficiency is None
+        assert snap.session_breakdown == {}

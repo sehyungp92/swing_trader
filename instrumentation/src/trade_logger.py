@@ -163,6 +163,7 @@ class TradeLogger:
         filter_decisions: Optional[List[dict]] = None,
         sizing_inputs: Optional[dict] = None,
         portfolio_state_at_entry: Optional[dict] = None,
+        **kwargs,
     ) -> TradeEvent:
         """Call immediately after a trade entry is confirmed (fill received)."""
         try:
@@ -215,6 +216,7 @@ class TradeLogger:
                 entry_slippage_bps=round(entry_slippage_bps, 2) if entry_slippage_bps else None,
                 entry_latency_ms=entry_latency_ms,
                 stage="entry",
+                **kwargs,
             )
 
             self._open_trades[trade_id] = trade
@@ -234,6 +236,7 @@ class TradeLogger:
         exchange_timestamp: Optional[datetime] = None,
         expected_exit_price: Optional[float] = None,
         exit_latency_ms: Optional[int] = None,
+        **kwargs,
     ) -> Optional[TradeEvent]:
         """Call immediately after a trade exit is confirmed."""
         try:
@@ -278,6 +281,11 @@ class TradeLogger:
                 exchange_timestamp=exch_ts,
                 data_source_id=self.data_source_id,
             ).to_dict()
+
+            # Apply enriched fields from kwargs
+            for k, v in kwargs.items():
+                if hasattr(trade, k):
+                    setattr(trade, k, v)
 
             self._write_event(trade)
             return trade
