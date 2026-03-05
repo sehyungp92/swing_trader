@@ -7,6 +7,9 @@ bars, no campaigns, no add-ons.  The simplest live engine in the system.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import hashlib
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -676,6 +679,10 @@ class KeltnerEngine:
                 side_str = "LONG" if direction == Direction.LONG else "SHORT"
                 pending = ctx  # ctx was popped from _pending_entry
                 vol_ratio = pending.get("volume", 0) / pending.get("volume_sma", 1) if pending.get("volume_sma", 0) > 0 else 0
+                _cfg_dict = dataclasses.asdict(cfg)
+                _param_set_id = hashlib.md5(
+                    json.dumps(_cfg_dict, sort_keys=True, default=str).encode()
+                ).hexdigest()[:8]
                 self._kit.log_entry(
                     trade_id=f"{symbol}_{pos.entry_time.isoformat()}",
                     pair=symbol,
@@ -698,6 +705,8 @@ class KeltnerEngine:
                          "margin_pct": 0},
                     ],
                     strategy_params={
+                        "param_set_id": _param_set_id,
+                        "config": _cfg_dict,
                         "stop_dist": stop_dist,
                         "r_price": r_price,
                         "kelt_ema_period": cfg.kelt_ema_period,

@@ -5,6 +5,9 @@ Orchestrates daily campaign management and hourly entry/add execution.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import hashlib
+import json
 import logging
 from datetime import datetime, date, timedelta, timezone
 from typing import Any, Optional
@@ -1783,6 +1786,11 @@ class BreakoutEngine:
                                     "correlation": round(corr, 3),
                                     "same_direction": (pos_b.direction == setup.direction),
                                 })
+                        _s3_cfg = self._config.get(setup.symbol)
+                        _cfg_dict = dataclasses.asdict(_s3_cfg) if _s3_cfg else {}
+                        _param_set_id = hashlib.md5(
+                            json.dumps(_cfg_dict, sort_keys=True, default=str).encode()
+                        ).hexdigest()[:8]
                         self._kit.log_entry(
                             trade_id=setup.setup_id,
                             pair=setup.symbol,
@@ -1797,6 +1805,8 @@ class BreakoutEngine:
                             passed_filters=["score_threshold", "displacement", "eligibility"],
                             filter_decisions=setup.filter_decisions if hasattr(setup, "filter_decisions") else [],
                             strategy_params={
+                                "param_set_id": _param_set_id,
+                                "config": _cfg_dict,
                                 "final_risk_dollars": setup.final_risk_dollars,
                                 "entry_type": setup.entry_type.value if hasattr(setup.entry_type, "value") else str(setup.entry_type),
                                 "quality_mult": setup.quality_mult,

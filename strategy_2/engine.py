@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import hashlib
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -2041,6 +2044,10 @@ class HelixEngine:
                             "relationship": "basket_peer",
                             "same_direction": (peer.direction == setup.direction),
                         })
+            _cfg_dict = dataclasses.asdict(cfg) if cfg else {}
+            _param_set_id = hashlib.md5(
+                json.dumps(_cfg_dict, sort_keys=True, default=str).encode()
+            ).hexdigest()[:8]
             self._kit.log_entry(
                 trade_id=setup.trade_id or setup.setup_id,
                 pair=setup.symbol,
@@ -2055,6 +2062,8 @@ class HelixEngine:
                 passed_filters=["spread_gate", "heat_cap"],
                 filter_decisions=setup.gate_decisions,
                 strategy_params={
+                    "param_set_id": _param_set_id,
+                    "config": _cfg_dict,
                     "adx_at_entry": setup.adx_at_entry,
                     "regime_4h": setup.regime_4h_at_entry,
                     "size_mult": setup.setup_size_mult,

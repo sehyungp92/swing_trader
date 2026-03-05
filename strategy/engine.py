@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import hashlib
+import json
 import logging
 import math
 from datetime import datetime, timedelta, timezone
@@ -1480,6 +1483,10 @@ class ATRSSEngine:
                 active_pos = {s: p for s, p in self.positions.items() if p.direction != Direction.FLAT}
                 quality_score = meta.get("quality_score", 0)
                 quality_margin = (quality_score - QUALITY_GATE_THRESHOLD) / max(QUALITY_GATE_THRESHOLD, 0.01) * 100 if QUALITY_GATE_THRESHOLD > 0 else 0
+                _cfg_dict = dataclasses.asdict(cfg)
+                _param_set_id = hashlib.md5(
+                    json.dumps(_cfg_dict, sort_keys=True, default=str).encode()
+                ).hexdigest()[:8]
                 self._kit.log_entry(
                     trade_id=trade_id or f"{sym}_{fill_time.isoformat()}",
                     pair=sym,
@@ -1501,6 +1508,8 @@ class ATRSSEngine:
                          "margin_pct": 0},
                     ],
                     strategy_params={
+                        "param_set_id": _param_set_id,
+                        "config": _cfg_dict,
                         "atrh": atrh,
                         "initial_stop": meta["initial_stop"],
                         "daily_mult": meta.get("daily_mult"),

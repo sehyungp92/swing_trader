@@ -143,3 +143,60 @@ class TestDailySnapshot:
         assert snap.avg_mae_pct is None
         assert snap.avg_exit_efficiency is None
         assert snap.session_breakdown == {}
+
+    def test_per_strategy_summary(self):
+        self._write_trades([
+            {"stage": "exit", "trade_id": "t1", "pnl": 100, "fees_paid": 5,
+             "strategy_id": "ATRSS", "pair": "AAPL",
+             "mfe_pct": 0.04, "mae_pct": 0.01, "exit_efficiency": 0.8},
+            {"stage": "exit", "trade_id": "t2", "pnl": -50, "fees_paid": 5,
+             "strategy_id": "ATRSS", "pair": "MSFT",
+             "mfe_pct": 0.02, "mae_pct": 0.02, "exit_efficiency": -0.5},
+            {"stage": "exit", "trade_id": "t3", "pnl": 200, "fees_paid": 3,
+             "strategy_id": "AKC_HELIX", "pair": "SPY",
+             "mfe_pct": 0.06, "mae_pct": 0.005, "exit_efficiency": 0.9},
+            {"stage": "exit", "trade_id": "t4", "pnl": 80, "fees_paid": 3,
+             "strategy_id": "AKC_HELIX", "pair": "QQQ",
+             "mfe_pct": 0.03, "mae_pct": 0.01, "exit_efficiency": 0.7},
+        ])
+        snap = self.builder.build(self.today)
+        assert snap.per_strategy_summary is not None
+        assert "ATRSS" in snap.per_strategy_summary
+        assert "AKC_HELIX" in snap.per_strategy_summary
+        atrss = snap.per_strategy_summary["ATRSS"]
+        assert atrss["trades"] == 2
+        assert atrss["win_count"] == 1
+        assert atrss["loss_count"] == 1
+        assert atrss["win_rate"] == 0.5
+        assert atrss["gross_pnl"] == 50.0
+        assert atrss["net_pnl"] == 40.0  # (100-5) + (-50-5) = 40
+        assert sorted(atrss["symbols_traded"]) == ["AAPL", "MSFT"]
+        helix = snap.per_strategy_summary["AKC_HELIX"]
+        assert helix["trades"] == 2
+        assert helix["win_count"] == 2
+        assert helix["win_rate"] == 1.0
+        assert sorted(helix["symbols_traded"]) == ["QQQ", "SPY"]
+
+    def test_overlay_state_summary(self):
+        self._write_trades([
+            {"stage": "entry", "trade_id": "ov1", "strategy_id": "OVERLAY", "pair": "QQQ"},
+        ])
+        snap = self.builder.build(self.today)
+        assert snap.overlay_state_summary is not None
+        assert snap.overlay_state_summary["qqq_bullish"] is True
+        assert snap.overlay_state_summary["gld_bullish"] is False
+        assert snap.overlay_state_summary["entry_count_today"] == 1
+        assert snap.overlay_state_summary["exit_count_today"] == 0
+        assert snap.overlay_state_summary["active_symbols"] == ["QQQ"]
+
+    def test_overlay_excluded_from_per_strategy(self):
+        self._write_trades([
+            {"stage": "exit", "trade_id": "t1", "pnl": 100, "fees_paid": 0,
+             "strategy_id": "ATRSS", "pair": "AAPL"},
+            {"stage": "exit", "trade_id": "ov1", "pnl": 50, "fees_paid": 0,
+             "strategy_id": "OVERLAY", "pair": "QQQ"},
+        ])
+        snap = self.builder.build(self.today)
+        assert snap.per_strategy_summary is not None
+        assert "OVERLAY" not in snap.per_strategy_summary
+        assert "ATRSS" in snap.per_strategy_summary

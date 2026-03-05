@@ -70,6 +70,10 @@ class DailySnapshot:
     avg_exit_efficiency: Optional[float] = None
     session_breakdown: Dict[str, dict] = field(default_factory=dict)
 
+    # Per-strategy breakdown (Gap #4c)
+    per_strategy_summary: Optional[dict] = field(default=None)
+    overlay_state_summary: Optional[dict] = field(default=None)
+
     # Execution quality
     avg_entry_slippage_bps: Optional[float] = None
     avg_exit_slippage_bps: Optional[float] = None
@@ -187,6 +191,44 @@ class DailySnapshotBuilder:
                 data["pnl"] = round(data["pnl"], 4)
                 data["win_rate"] = round(data["wins"] / data["trades"], 4) if data["trades"] > 0 else 0
             snapshot.session_breakdown = session_data
+
+        # --- PER-STRATEGY SUMMARY ---
+        strategy_ids = sorted({t.get("strategy_id", "") for t in completed
+                                if t.get("strategy_id") and t.get("strategy_id") != "OVERLAY"})
+        per_strategy_summary: dict = {}
+        for sid in strategy_ids:
+            st = [t for t in completed if t.get("strategy_id") == sid]
+            wins_st   = [t for t in st if (t.get("pnl") or 0) > 0]
+            losses_st = [t for t in st if (t.get("pnl") or 0) < 0]
+            mfes   = [t["mfe_pct"] for t in st if t.get("mfe_pct") is not None]
+            maes   = [t["mae_pct"] for t in st if t.get("mae_pct") is not None]
+            effs   = [t["exit_efficiency"] for t in st if t.get("exit_efficiency") is not None]
+            per_strategy_summary[sid] = {
+                "trades":              len(st),
+                "win_count":           len(wins_st),
+                "loss_count":          len(losses_st),
+                "gross_pnl":           round(sum(t.get("pnl") or 0 for t in st), 2),
+                "net_pnl":             round(sum((t.get("pnl") or 0) - (t.get("fees_paid") or 0) for t in st), 2),
+                "win_rate":            round(len(wins_st) / len(st), 3) if st else None,
+                "avg_mfe_pct":         round(sum(mfes) / len(mfes), 4) if mfes else None,
+                "avg_mae_pct":         round(sum(maes) / len(maes), 4) if maes else None,
+                "avg_exit_efficiency": round(sum(effs) / len(effs), 3) if effs else None,
+                "symbols_traded":      sorted({t.get("pair") for t in st if t.get("pair")}),
+            }
+        snapshot.per_strategy_summary = per_strategy_summary or None
+
+        # --- OVERLAY STATE SUMMARY ---
+        overlay_all = [t for t in trades if t.get("strategy_id") == "OVERLAY"]
+        overlay_in  = [t for t in overlay_all if t.get("stage") == "entry"]
+        overlay_out = [t for t in overlay_all if t.get("stage") == "exit"]
+        open_syms = {t.get("pair") for t in overlay_in} - {t.get("pair") for t in overlay_out}
+        snapshot.overlay_state_summary = {
+            "entry_count_today":  len(overlay_in),
+            "exit_count_today":   len(overlay_out),
+            "qqq_bullish":        "QQQ" in open_syms,
+            "gld_bullish":        "GLD" in open_syms,
+            "active_symbols":     sorted(open_syms),
+        }
 
         # --- MISSED OPPORTUNITIES ---
         snapshot.missed_count = len(missed)
