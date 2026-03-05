@@ -23,6 +23,8 @@ class InstrumentationContext:
     daily_builder: object = None      # DailySnapshotBuilder
     regime_classifier: object = None  # RegimeClassifier
     sidecar: object = None            # Sidecar
+    drawdown_tracker: object = None   # DrawdownTracker
+    overnight_gap_tracker: object = None  # OvernightGapTracker
     data_dir: str = "instrumentation/data"
 
     _started: bool = field(default=False, repr=False)

@@ -28,6 +28,7 @@ def bootstrap_instrumentation(
     symbols: list[str] | None = None,
     data_provider=None,
     strategy_id: str | None = None,
+    initial_equity: float = 100_000,
 ) -> "InstrumentationContext":
     """Create an InstrumentationContext with all services wired up.
 
@@ -66,6 +67,11 @@ def bootstrap_instrumentation(
     regime_classifier = RegimeClassifier(data_provider=data_provider)
     sidecar = Sidecar(config)
 
+    from .drawdown_tracker import DrawdownTracker
+    from .overnight_gap_tracker import OvernightGapTracker
+    drawdown_tracker = DrawdownTracker(initial_equity=initial_equity)
+    gap_tracker = OvernightGapTracker()
+
     ctx = InstrumentationContext(
         snapshot_service=snapshot_service,
         trade_logger=trade_logger,
@@ -74,6 +80,8 @@ def bootstrap_instrumentation(
         daily_builder=daily_builder,
         regime_classifier=regime_classifier,
         sidecar=sidecar,
+        drawdown_tracker=drawdown_tracker,
+        overnight_gap_tracker=gap_tracker,
         data_dir=config.get("data_dir", "instrumentation/data"),
     )
 
@@ -88,6 +96,7 @@ def bootstrap_kit(
     strategy_id: str,
     symbols: list[str] | None = None,
     data_provider=None,
+    initial_equity: float = 100_000,
 ) -> "InstrumentationKit":
     """Create an InstrumentationKit with all services wired up.
 
@@ -108,6 +117,7 @@ def bootstrap_kit(
         symbols=symbols,
         data_provider=data_provider,
         strategy_id=strategy_id,
+        initial_equity=initial_equity,
     )
     return InstrumentationKit(ctx, strategy_id=strategy_id)
 
