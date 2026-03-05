@@ -300,6 +300,12 @@ class SetupInstance:
     realized_pnl: float = 0.0
     r_state: float = 0.0
     
+    # Excursion tracking
+    mfe_price: float = 0.0
+    mae_price: float = 0.0
+    mfe_r: float = 0.0
+    mae_r: float = 0.0
+
     # Recording
     trade_id: str = ""
     

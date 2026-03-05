@@ -1247,6 +1247,30 @@ class BreakoutEngine:
 
             current_price = hs.close
 
+            # MFE/MAE price tracking
+            bar_high = float(hs.highs[-1]) if hs.highs else current_price
+            bar_low = float(hs.lows[-1]) if hs.lows else current_price
+            if setup.direction == Direction.LONG:
+                if bar_high > setup.mfe_price or setup.mfe_price == 0:
+                    setup.mfe_price = bar_high
+                if bar_low < setup.mae_price or setup.mae_price == 0:
+                    setup.mae_price = bar_low
+            else:
+                if bar_low < setup.mfe_price or setup.mfe_price == 0:
+                    setup.mfe_price = bar_low
+                if bar_high > setup.mae_price or setup.mae_price == 0:
+                    setup.mae_price = bar_high
+            # MFE/MAE R computation
+            if setup.fill_price and setup.final_risk_dollars and setup.fill_qty:
+                risk_per_share = setup.final_risk_dollars / setup.fill_qty
+                if risk_per_share > 0:
+                    if setup.direction == Direction.LONG:
+                        setup.mfe_r = (setup.mfe_price - setup.fill_price) / risk_per_share
+                        setup.mae_r = (setup.fill_price - setup.mae_price) / risk_per_share
+                    else:
+                        setup.mfe_r = (setup.fill_price - setup.mfe_price) / risk_per_share
+                        setup.mae_r = (setup.mae_price - setup.fill_price) / risk_per_share
+
             # Compute current R (match backtest: include realized PnL from partials)
             r_base = setup.r_price
             r_state = 0.0
