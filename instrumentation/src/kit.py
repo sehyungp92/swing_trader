@@ -89,6 +89,9 @@ class InstrumentationKit:
         expected_entry_price: Optional[float] = None,
         entry_latency_ms: Optional[int] = None,
         bar_id: Optional[str] = None,
+        experiment_id: Optional[str] = None,
+        concurrent_positions_strategy: Optional[int] = None,
+        correlated_pairs_detail: Optional[list] = None,
     ) -> Any:
         """Log a trade entry with full instrumentation and enriched data.
 
@@ -135,6 +138,20 @@ class InstrumentationKit:
             if self.ctx.regime_classifier is not None:
                 regime = self.ctx.regime_classifier.current_regime(pair) or "unknown"
 
+            # Auto-capture drawdown context
+            drawdown_ctx = {}
+            if self.ctx.drawdown_tracker is not None:
+                drawdown_ctx = self.ctx.drawdown_tracker.get_entry_context()
+
+            # Auto-capture session context
+            from .session_classifier import SessionClassifier
+            session_ctx = SessionClassifier.classify(datetime.now())
+
+            # Auto-capture overnight gap
+            gap_ctx = {}
+            if self.ctx.overnight_gap_tracker is not None:
+                gap_ctx = self.ctx.overnight_gap_tracker.compute_gap(pair, entry_price)
+
             # Log the entry with all parameters including enriched ones
             trade_event = self.ctx.trade_logger.log_entry(
                 trade_id=trade_id,
@@ -160,6 +177,12 @@ class InstrumentationKit:
                 filter_decisions=filter_decisions or [],
                 sizing_inputs=sizing_inputs,
                 portfolio_state_at_entry=portfolio_state_at_entry,
+                experiment_id=experiment_id,
+                concurrent_positions_strategy=concurrent_positions_strategy,
+                correlated_pairs_detail=correlated_pairs_detail,
+                **drawdown_ctx,
+                **session_ctx,
+                **gap_ctx,
             )
 
             return trade_event.to_dict() if hasattr(trade_event, 'to_dict') else {}
@@ -175,6 +198,13 @@ class InstrumentationKit:
         exchange_timestamp: Optional[datetime] = None,
         expected_exit_price: Optional[float] = None,
         exit_latency_ms: Optional[int] = None,
+        mfe_price: Optional[float] = None,
+        mae_price: Optional[float] = None,
+        mfe_pct: Optional[float] = None,
+        mae_pct: Optional[float] = None,
+        mfe_r: Optional[float] = None,
+        mae_r: Optional[float] = None,
+        pnl_pct: Optional[float] = None,
     ) -> Any:
         """Log a trade exit and auto-score the process quality.
 
@@ -202,6 +232,11 @@ class InstrumentationKit:
             if self.ctx is None or self.ctx.trade_logger is None:
                 return {}
 
+            # Compute exit efficiency
+            exit_efficiency = None
+            if mfe_pct and mfe_pct > 0 and pnl_pct is not None:
+                exit_efficiency = round(pnl_pct / mfe_pct, 4)
+
             # Log the exit
             trade_event = self.ctx.trade_logger.log_exit(
                 trade_id=trade_id,
@@ -211,6 +246,13 @@ class InstrumentationKit:
                 exchange_timestamp=exchange_timestamp,
                 expected_exit_price=expected_exit_price,
                 exit_latency_ms=exit_latency_ms,
+                mfe_price=mfe_price,
+                mae_price=mae_price,
+                mfe_pct=mfe_pct,
+                mae_pct=mae_pct,
+                mfe_r=mfe_r,
+                mae_r=mae_r,
+                exit_efficiency=exit_efficiency,
             )
 
             if trade_event is None:
