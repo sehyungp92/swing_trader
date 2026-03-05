@@ -679,6 +679,14 @@ class ATRSSEngine:
             if h.low < pos.mfe_price:
                 pos.mfe_price = h.low
 
+        # Update MAE — mae_price is initialized to fill_price at position creation
+        if pos.direction == Direction.LONG:
+            if h.low < pos.mae_price:
+                pos.mae_price = h.low
+        else:
+            if h.high > pos.mae_price:
+                pos.mae_price = h.high
+
         base = pos.base_leg
         if base is None:
             return
@@ -687,8 +695,10 @@ class ATRSSEngine:
         if risk_per_unit > 0:
             if pos.direction == Direction.LONG:
                 pos.mfe = (pos.mfe_price - base.entry_price) / risk_per_unit
+                pos.mae = (base.entry_price - pos.mae_price) / risk_per_unit
             else:
                 pos.mfe = (base.entry_price - pos.mfe_price) / risk_per_unit
+                pos.mae = (pos.mae_price - base.entry_price) / risk_per_unit
 
         # Compute current R for TP / stall / addon decisions
         if risk_per_unit > 0:
@@ -1426,6 +1436,7 @@ class ATRSSEngine:
                 legs=[leg],
                 current_stop=meta["initial_stop"],
                 mfe_price=fill_price,
+                mae_price=fill_price,
                 entry_time=fill_time,
                 stop_pending=True,  # C3: flag that stop is being placed
             )

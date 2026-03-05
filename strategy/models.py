@@ -130,6 +130,8 @@ class PositionBook:
     current_stop: float = 0.0
     mfe: float = 0.0                # in R units
     mfe_price: float = 0.0
+    mae: float = 0.0                # in R units (adverse excursion)
+    mae_price: float = 0.0
     entry_time: Optional[datetime] = None
     be_triggered: bool = False
     addon_a_done: bool = False
