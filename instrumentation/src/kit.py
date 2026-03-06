@@ -152,6 +152,18 @@ class InstrumentationKit:
             if self.ctx.overnight_gap_tracker is not None:
                 gap_ctx = self.ctx.overnight_gap_tracker.compute_gap(pair, entry_price)
 
+            # Auto-capture overlay state
+            overlay_ctx = {}
+            if self.ctx.overlay_state_provider is not None:
+                try:
+                    signals = self.ctx.overlay_state_provider()
+                    overlay_ctx = {"overlay_state": {
+                        "qqq_ema_bullish": signals.get("QQQ", False),
+                        "gld_ema_bullish": signals.get("GLD", False),
+                    }}
+                except Exception:
+                    pass
+
             # Log the entry with all parameters including enriched ones
             trade_event = self.ctx.trade_logger.log_entry(
                 trade_id=trade_id,
@@ -183,6 +195,7 @@ class InstrumentationKit:
                 **drawdown_ctx,
                 **session_ctx,
                 **gap_ctx,
+                **overlay_ctx,
             )
 
             return trade_event.to_dict() if hasattr(trade_event, 'to_dict') else {}

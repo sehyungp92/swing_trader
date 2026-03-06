@@ -73,6 +73,8 @@ class OverlayEngine:
         self._last_rebalance_date: str = ""
         # Trade IDs for open overlay positions (persisted for exit instrumentation)
         self._entry_trade_ids: dict[str, str] = {}
+        # Last EMA crossover signals (persisted for transition detection)
+        self._last_signals: dict[str, bool] = {}
 
         # Async state
         self._daily_task: asyncio.Task | None = None
@@ -218,6 +220,31 @@ class OverlayEngine:
                 sym, fast, ema_fast[-1], slow, ema_slow[-1],
                 "BULLISH" if signals[sym] else "BEARISH",
             )
+
+        # 4b. Log signal transitions via coordination logger
+        if self._last_signals:
+            for sym in self._config.symbols:
+                old = self._last_signals.get(sym)
+                new = signals.get(sym, False)
+                if old is not None and old != new:
+                    try:
+                        if self._instr and getattr(self._instr, 'coordination_logger', None):
+                            self._instr.coordination_logger.log_action(
+                                action="overlay_signal_change",
+                                trigger_strategy="OVERLAY",
+                                target_strategy="ALL",
+                                symbol=sym,
+                                rule="ema_crossover",
+                                details={
+                                    "old_bullish": old,
+                                    "new_bullish": new,
+                                    "direction": "BULLISH" if new else "BEARISH",
+                                },
+                                outcome="emitted",
+                            )
+                    except Exception:
+                        pass
+        self._last_signals = dict(signals)
 
         # 5. Compute target shares
         if self._config.weights is None:
@@ -368,6 +395,7 @@ class OverlayEngine:
             self._shares = {sym: data.get("shares", {}).get(sym, 0) for sym in self._config.symbols}
             self._last_rebalance_date = data.get("last_rebalance_date", "")
             self._entry_trade_ids = data.get("entry_trade_ids", {})
+            self._last_signals = data.get("last_signals", {})
             logger.info(
                 "Overlay: loaded state — shares=%s, last_rebalance=%s",
                 self._shares, self._last_rebalance_date,
@@ -382,6 +410,7 @@ class OverlayEngine:
             "shares": self._shares,
             "last_rebalance_date": self._last_rebalance_date,
             "entry_trade_ids": self._entry_trade_ids,
+            "last_signals": self._last_signals,
         }
         try:
             path.write_text(json.dumps(data, indent=2))
@@ -392,6 +421,10 @@ class OverlayEngine:
     # ------------------------------------------------------------------
     # Accessors
     # ------------------------------------------------------------------
+
+    def get_signals(self) -> dict[str, bool]:
+        """Return last computed EMA crossover signals per symbol."""
+        return dict(self._last_signals)
 
     def get_positions(self) -> dict[str, int]:
         """Return current overlay share counts."""

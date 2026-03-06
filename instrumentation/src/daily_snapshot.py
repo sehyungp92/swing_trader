@@ -222,12 +222,20 @@ class DailySnapshotBuilder:
         overlay_in  = [t for t in overlay_all if t.get("stage") == "entry"]
         overlay_out = [t for t in overlay_all if t.get("stage") == "exit"]
         open_syms = {t.get("pair") for t in overlay_in} - {t.get("pair") for t in overlay_out}
+
+        # Load coordinator actions for today
+        coordinator_actions = self._load_jsonl("coordination", "coordination", date_str)
+
         snapshot.overlay_state_summary = {
             "entry_count_today":  len(overlay_in),
             "exit_count_today":   len(overlay_out),
             "qqq_bullish":        "QQQ" in open_syms,
             "gld_bullish":        "GLD" in open_syms,
             "active_symbols":     sorted(open_syms),
+            "coordinator_actions_today": len(coordinator_actions),
+            "coordinator_action_types": dict(Counter(
+                a.get("action") for a in coordinator_actions
+            )),
         }
 
         # --- MISSED OPPORTUNITIES ---

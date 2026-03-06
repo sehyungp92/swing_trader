@@ -189,6 +189,26 @@ class TestDailySnapshot:
         assert snap.overlay_state_summary["exit_count_today"] == 0
         assert snap.overlay_state_summary["active_symbols"] == ["QQQ"]
 
+    def test_coordinator_actions_in_overlay_summary(self):
+        coord_dir = Path(self.tmpdir) / "coordination"
+        coord_dir.mkdir(parents=True, exist_ok=True)
+        filepath = coord_dir / f"coordination_{self.today}.jsonl"
+        actions = [
+            {"action": "tighten_stop_be", "symbol": "QQQ", "outcome": "applied"},
+            {"action": "tighten_stop_be", "symbol": "SPY", "outcome": "skipped_already_tighter"},
+            {"action": "size_boost", "symbol": "QQQ", "outcome": "applied"},
+        ]
+        with open(filepath, "w") as f:
+            for a in actions:
+                f.write(json.dumps(a) + "\n")
+
+        snap = self.builder.build(self.today)
+        assert snap.overlay_state_summary is not None
+        assert snap.overlay_state_summary["coordinator_actions_today"] == 3
+        types = snap.overlay_state_summary["coordinator_action_types"]
+        assert types["tighten_stop_be"] == 2
+        assert types["size_boost"] == 1
+
     def test_overlay_excluded_from_per_strategy(self):
         self._write_trades([
             {"stage": "exit", "trade_id": "t1", "pnl": 100, "fees_paid": 0,

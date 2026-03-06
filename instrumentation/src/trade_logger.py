@@ -109,6 +109,9 @@ class TradeEvent:
     overnight_gap_pct: Optional[float] = None
     prev_close_price: Optional[float] = None
 
+    # Overlay macro regime (S5)
+    overlay_state: Optional[dict] = None  # {"qqq_ema_bullish": bool, "gld_ema_bullish": bool}
+
     # Metadata (B11, S4)
     experiment_id: Optional[str] = None
     concurrent_positions_strategy: Optional[int] = None

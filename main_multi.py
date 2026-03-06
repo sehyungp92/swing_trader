@@ -274,6 +274,13 @@ async def main() -> None:
     )
 
     # -------------------------------------------------------------------
+    # 8b. Wire coordinator action logger
+    # -------------------------------------------------------------------
+    if instrumentation_ctx and getattr(instrumentation_ctx, 'coordination_logger', None):
+        coordinator.set_action_logger(instrumentation_ctx.coordination_logger.log_action)
+        logger.info("Coordinator action logger wired")
+
+    # -------------------------------------------------------------------
     # 9. Start OMS
     # -------------------------------------------------------------------
     await oms.start()
@@ -366,6 +373,17 @@ async def main() -> None:
         market_calendar=market_cal,
         instrumentation=instrumentation_ctx,
     )
+
+    # -------------------------------------------------------------------
+    # 10b. Wire overlay state provider to all kits
+    # -------------------------------------------------------------------
+    if overlay_config.enabled:
+        overlay_state_fn = overlay_engine.get_signals
+        if instrumentation_ctx is not None:
+            instrumentation_ctx.overlay_state_provider = overlay_state_fn
+        for kit_obj in [atrss_kit, helix_kit, breakout_kit, s5_pb_kit, s5_dual_kit]:
+            if kit_obj is not None:
+                kit_obj.ctx.overlay_state_provider = overlay_state_fn
 
     # -------------------------------------------------------------------
     # 11. Start all engines

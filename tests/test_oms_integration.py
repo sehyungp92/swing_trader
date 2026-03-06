@@ -1616,3 +1616,59 @@ class TestCrossStrategyIntegration:
         )
         cal = EventCalendar(windows=[window])
         assert cal.is_blocked(now) is False
+
+
+# ---------------------------------------------------------------------------
+# 13. Coordinator Action Logging
+# ---------------------------------------------------------------------------
+class TestCoordinatorActionLogging:
+    """Tests for the StrategyCoordinator action logging callback."""
+
+    def test_rule1_calls_action_logger(self):
+        """on_fill emitting Rule 1 should call the registered action logger."""
+        bus = EventBus()
+        coord = StrategyCoordinator(bus)
+
+        logged_calls = []
+        coord.set_action_logger(lambda **kwargs: logged_calls.append(kwargs))
+
+        # Set up a Helix position so Rule 1 triggers
+        coord.on_position_update("AKC_HELIX", "QQQ", 10, "LONG", entry_price=480.0)
+
+        # ATRSS entry fill on same symbol
+        coord.on_fill("ATRSS", "QQQ", "BUY", "ENTRY", price=485.0)
+
+        assert len(logged_calls) == 1
+        call = logged_calls[0]
+        assert call["action"] == "tighten_stop_be"
+        assert call["trigger_strategy"] == "ATRSS"
+        assert call["target_strategy"] == "AKC_HELIX"
+        assert call["symbol"] == "QQQ"
+        assert call["rule"] == "rule_1"
+        assert call["outcome"] == "emitted"
+        assert call["details"]["fill_price"] == 485.0
+
+    def test_log_action_no_logger_no_crash(self):
+        """log_action with no registered logger should be a no-op."""
+        bus = EventBus()
+        coord = StrategyCoordinator(bus)
+        # No set_action_logger called — should not raise
+        coord.log_action(
+            action="test", trigger_strategy="A", target_strategy="B",
+            symbol="QQQ", rule="test", outcome="applied",
+        )
+
+    def test_log_action_callback_exception_swallowed(self):
+        """If the callback raises, log_action should not propagate."""
+        bus = EventBus()
+        coord = StrategyCoordinator(bus)
+
+        def bad_logger(**kwargs):
+            raise RuntimeError("boom")
+
+        coord.set_action_logger(bad_logger)
+        # Should not raise
+        coord.log_action(
+            action="test", trigger_strategy="A", target_strategy="B",
+            symbol="QQQ", rule="test", outcome="applied",
+        )

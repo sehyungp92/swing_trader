@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,20 @@ class StrategyCoordinator:
         self._repo = repo
         # (strategy_id, symbol) → OpenPosition
         self._position_book: dict[tuple[str, str], OpenPosition] = {}
+        self._on_action: Callable | None = None
+
+    def set_action_logger(self, callback: Callable) -> None:
+        """Register a callback for logging coordination actions."""
+        self._on_action = callback
+
+    def log_action(self, **kwargs) -> None:
+        """Delegate to registered action logger. Never crashes."""
+        if self._on_action is None:
+            return
+        try:
+            self._on_action(**kwargs)
+        except Exception as e:
+            logger.warning("Coordinator action logging failed: %s", e)
 
     def on_fill(
         self,
@@ -65,6 +79,15 @@ class StrategyCoordinator:
                     target_strategy="AKC_HELIX",
                     event_type="TIGHTEN_STOP_BE",
                     symbol=symbol,
+                )
+                self.log_action(
+                    action="tighten_stop_be",
+                    trigger_strategy="ATRSS",
+                    target_strategy="AKC_HELIX",
+                    symbol=symbol,
+                    rule="rule_1",
+                    details={"fill_price": price, "direction": side},
+                    outcome="emitted",
                 )
 
     def on_position_update(

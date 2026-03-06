@@ -220,3 +220,35 @@ class TestTradeEventEnrichment:
         assert evt.experiment_id is None
         assert evt.concurrent_positions_strategy is None
         assert evt.correlated_pairs_detail is None
+
+    def test_overlay_state_field_default_none(self):
+        evt = TradeEvent(trade_id="test", event_metadata={}, entry_snapshot={})
+        assert evt.overlay_state is None
+
+    def test_overlay_state_kwarg_persisted(self):
+        """overlay_state passed as kwarg should be persisted on the TradeEvent."""
+        config = {
+            "bot_id": "test_bot",
+            "data_dir": __import__("tempfile").mkdtemp(),
+            "data_source_id": "test",
+            "market_snapshots": {"interval_seconds": 60, "symbols": []},
+        }
+        from instrumentation.src.market_snapshot import MarketSnapshotService, MarketSnapshot
+        from unittest.mock import MagicMock
+        snap_service = MagicMock(spec=MarketSnapshotService)
+        snap_service.capture_now.return_value = MarketSnapshot(
+            snapshot_id="test", symbol="QQQ", timestamp="2026-03-01T10:00:00Z",
+            bid=500, ask=501, mid=500.5, spread_bps=2.0, last_trade_price=500.5,
+            atr_14=5.0, volume_24h=1000000,
+        )
+        from instrumentation.src.trade_logger import TradeLogger
+        tl = TradeLogger(config, snap_service)
+        trade = tl.log_entry(
+            trade_id="t_overlay", pair="QQQ", side="LONG",
+            entry_price=500, position_size=10, position_size_quote=5000,
+            entry_signal="test", entry_signal_id="test",
+            entry_signal_strength=0.5, active_filters=[], passed_filters=[],
+            strategy_params={},
+            overlay_state={"qqq_ema_bullish": True, "gld_ema_bullish": False},
+        )
+        assert trade.overlay_state == {"qqq_ema_bullish": True, "gld_ema_bullish": False}

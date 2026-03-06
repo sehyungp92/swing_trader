@@ -30,6 +30,7 @@ _DIR_TO_EVENT_TYPE = {
     "scores": "process_quality",
     "daily": "daily_snapshot",
     "post_exit": "post_exit",
+    "coordination": "coordinator_action",
 }
 
 

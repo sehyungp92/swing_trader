@@ -842,10 +842,23 @@ class HelixEngine:
         if self._coordinator:
             direction_str = "LONG" if setup.direction == Direction.LONG else "SHORT"
             if self._coordinator.has_atrss_position(setup.symbol, direction_str):
+                original_size_mult = effective_size_mult
                 effective_size_mult *= self.ATRSS_SIZE_BOOST
                 logger.info(
                     "COORD Rule 2: Boosting %s size by %.0f%% (ATRSS active same direction)",
                     setup.symbol, (self.ATRSS_SIZE_BOOST - 1) * 100,
+                )
+                self._coordinator.log_action(
+                    action="size_boost",
+                    trigger_strategy="ATRSS",
+                    target_strategy="AKC_HELIX",
+                    symbol=setup.symbol,
+                    rule="rule_2",
+                    details={"boost_factor": self.ATRSS_SIZE_BOOST,
+                             "original_size_mult": original_size_mult,
+                             "effective_size_mult": effective_size_mult,
+                             "direction": direction_str},
+                    outcome="applied",
                 )
 
         # Position size
@@ -1860,22 +1873,71 @@ class HelixEngine:
             # Compute breakeven with small ATR offset
             tf1h = self.tf_states.get(symbol, {}).get("1H")
             atr_offset = BE_ATR1H_OFFSET * tf1h.atr if (tf1h and tf1h.atr > 0) else 0
+            direction_str = "LONG" if setup.direction == Direction.LONG else "SHORT"
             if setup.direction == Direction.LONG:
                 be_level = setup.fill_price + atr_offset
                 if setup.current_stop < be_level:
+                    old_stop = setup.current_stop
                     logger.info(
                         "COORD Rule 1: Tightening Helix %s stop to BE %.4f (was %.4f)",
-                        symbol, be_level, setup.current_stop,
+                        symbol, be_level, old_stop,
                     )
                     await self._update_stop(setup, be_level)
+                    if self._coordinator:
+                        self._coordinator.log_action(
+                            action="tighten_stop_be",
+                            trigger_strategy="ATRSS",
+                            target_strategy="AKC_HELIX",
+                            symbol=symbol,
+                            rule="rule_1",
+                            details={"old_stop": old_stop, "new_stop": be_level,
+                                     "direction": direction_str, "fill_price": setup.fill_price},
+                            outcome="applied",
+                        )
+                else:
+                    if self._coordinator:
+                        self._coordinator.log_action(
+                            action="tighten_stop_be",
+                            trigger_strategy="ATRSS",
+                            target_strategy="AKC_HELIX",
+                            symbol=symbol,
+                            rule="rule_1",
+                            details={"current_stop": setup.current_stop, "be_level": be_level,
+                                     "direction": direction_str},
+                            outcome="skipped_already_tighter",
+                        )
             else:
                 be_level = setup.fill_price - atr_offset
                 if setup.current_stop > be_level:
+                    old_stop = setup.current_stop
                     logger.info(
                         "COORD Rule 1: Tightening Helix %s stop to BE %.4f (was %.4f)",
-                        symbol, be_level, setup.current_stop,
+                        symbol, be_level, old_stop,
                     )
                     await self._update_stop(setup, be_level)
+                    if self._coordinator:
+                        self._coordinator.log_action(
+                            action="tighten_stop_be",
+                            trigger_strategy="ATRSS",
+                            target_strategy="AKC_HELIX",
+                            symbol=symbol,
+                            rule="rule_1",
+                            details={"old_stop": old_stop, "new_stop": be_level,
+                                     "direction": direction_str, "fill_price": setup.fill_price},
+                            outcome="applied",
+                        )
+                else:
+                    if self._coordinator:
+                        self._coordinator.log_action(
+                            action="tighten_stop_be",
+                            trigger_strategy="ATRSS",
+                            target_strategy="AKC_HELIX",
+                            symbol=symbol,
+                            rule="rule_1",
+                            details={"current_stop": setup.current_stop, "be_level": be_level,
+                                     "direction": direction_str},
+                            outcome="skipped_already_tighter",
+                        )
 
     async def _on_fill(self, oms_order_id: str | None, payload: dict) -> None:
         """Handle a fill event — create position state, place protective stop."""
