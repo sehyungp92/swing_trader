@@ -73,6 +73,9 @@ class SymbolConfig:
     tp_scale: float = 1.0
     # Allowed trade directions — filter negative-EV sides per symbol
     allowed_directions: tuple[str, ...] = ("LONG", "SHORT")
+    # Experiment A/B tracking
+    experiment_id: str = ""
+    experiment_variant: str = ""
 
 
 # ---------------------------------------------------------------------------

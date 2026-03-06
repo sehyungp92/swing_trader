@@ -233,6 +233,9 @@ class KeltnerEngine:
         lows = np.array([b.low for b in bars], dtype=float)
         volumes = np.array([b.volume for b in bars], dtype=float)
 
+        if self._kit and len(closes) > 0:
+            self._kit.record_close(symbol, float(closes[-1]))
+
         # Compute DailyState (same as backtest S5Engine._compute_state)
         state = self._compute_state(closes, highs, lows, volumes, cfg)
 

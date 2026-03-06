@@ -417,6 +417,9 @@ class BreakoutEngine:
             for b in bars
         ]
 
+        if self._kit and len(closes) > 0:
+            self._kit.record_close(symbol, float(closes[-1]))
+
         # --- 1) Compute daily indicators ---
         atr14_d_arr = atr(highs, lows, closes, ATR_DAILY_PERIOD)
         atr50_d_arr = atr(highs, lows, closes, ATR_DAILY_LONG_PERIOD)

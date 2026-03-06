@@ -58,6 +58,9 @@ class SymbolConfig:
 
     # Shorts
     shorts_enabled: bool = True
+    # Experiment A/B tracking
+    experiment_id: str = ""
+    experiment_variant: str = ""
 
 
 SYMBOL_CONFIGS: dict[str, SymbolConfig] = {

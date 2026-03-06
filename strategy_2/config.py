@@ -57,6 +57,9 @@ class SymbolConfig:
     teleport_offset_mult: float = 2.0
     # Risk
     base_risk_pct: float = 0.005   # 0.50% per spec s8.1
+    # Experiment A/B tracking
+    experiment_id: str = ""
+    experiment_variant: str = ""
 
 
 # ---------------------------------------------------------------------------

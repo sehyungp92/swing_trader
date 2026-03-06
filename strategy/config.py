@@ -59,6 +59,9 @@ class SymbolConfig:
     blocked_weekdays: tuple[int, ...] = ()
     # Per-symbol size reduction by month (month_number -> fraction, e.g. {12: 0.5})
     size_reduction_months: tuple[tuple[int, float], ...] = ()
+    # Experiment A/B tracking
+    experiment_id: str = ""
+    experiment_variant: str = ""
 
 
 _MICRO_CONFIGS: dict[str, SymbolConfig] = {

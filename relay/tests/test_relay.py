@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -69,6 +70,58 @@ class TestEventStore:
         assert self.store.count_pending() == 1
         self.store.ack_up_to("e1")
         assert self.store.count_pending() == 0
+
+    def test_priority_ordering(self):
+        """Events with lower priority number should come first."""
+        events = [
+            {"event_id": "low", "bot_id": "bot1", "event_type": "post_exit", "payload": "{}", "priority": 4},
+            {"event_id": "high", "bot_id": "bot1", "event_type": "error", "payload": "{}", "priority": 1},
+            {"event_id": "mid", "bot_id": "bot1", "event_type": "trade", "payload": "{}", "priority": 3},
+        ]
+        self.store.insert_events(events)
+        fetched = self.store.get_events()
+        assert fetched[0]["event_id"] == "high"
+        assert fetched[1]["event_id"] == "mid"
+        assert fetched[2]["event_id"] == "low"
+
+    def test_purge_acked_deletes_old(self):
+        from datetime import timedelta
+        self.store.insert_events([
+            {"event_id": "old1", "bot_id": "bot1", "event_type": "trade", "payload": "{}"},
+        ])
+        self.store.ack_up_to("old1")
+        # Manually backdate the received_at to 30 days ago
+        import sqlite3
+        conn = sqlite3.connect(self.db_path)
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        conn.execute("UPDATE events SET received_at = ? WHERE event_id = 'old1'", (old_ts,))
+        conn.commit()
+        conn.close()
+        deleted = self.store.purge_acked(days=7)
+        assert deleted == 1
+
+    def test_purge_keeps_recent(self):
+        self.store.insert_events([
+            {"event_id": "recent1", "bot_id": "bot1", "event_type": "trade", "payload": "{}"},
+        ])
+        self.store.ack_up_to("recent1")
+        deleted = self.store.purge_acked(days=7)
+        assert deleted == 0
+
+    def test_purge_ignores_unacked(self):
+        from datetime import timedelta
+        self.store.insert_events([
+            {"event_id": "unacked1", "bot_id": "bot1", "event_type": "trade", "payload": "{}"},
+        ])
+        # Backdate but don't ack
+        import sqlite3
+        conn = sqlite3.connect(self.db_path)
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        conn.execute("UPDATE events SET received_at = ? WHERE event_id = 'unacked1'", (old_ts,))
+        conn.commit()
+        conn.close()
+        deleted = self.store.purge_acked(days=7)
+        assert deleted == 0
 
     def test_filter_by_bot_id(self):
         self.store.insert_events([
@@ -277,6 +330,57 @@ class TestRelayAPI:
         assert client.post("/events", content=body, headers=headers).status_code == 200
         # Third should be rate limited
         assert client.post("/events", content=body, headers=headers).status_code == 429
+
+    def test_admin_purge_endpoint(self):
+        resp = self.client.post("/admin/purge?days=7")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert "deleted" in data
+
+    def test_ingest_gzip(self):
+        """Relay should accept gzip-compressed event batches."""
+        import gzip as gzip_mod
+        payload = {
+            "bot_id": "test_bot",
+            "events": [{
+                "event_id": "evt-gzip-1",
+                "bot_id": "test_bot",
+                "event_type": "trade",
+                "payload": "{}",
+                "exchange_timestamp": "2026-03-02T00:00:00Z",
+                "priority": 3,
+            }],
+        }
+        body = json.dumps(payload, sort_keys=True)
+        sig = hmac.new(self.secret.encode(), body.encode(), hashlib.sha256).hexdigest()
+        compressed = gzip_mod.compress(body.encode())
+        resp = self.client.post(
+            "/events",
+            content=compressed,
+            headers={
+                "Content-Type": "application/json",
+                "Content-Encoding": "gzip",
+                "X-Signature": sig,
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["accepted"] == 1
+
+    def test_priority_in_event_model(self):
+        payload = {
+            "bot_id": "test_bot",
+            "events": [{
+                "event_id": "evt-priority-1",
+                "bot_id": "test_bot",
+                "event_type": "error",
+                "payload": "{}",
+                "priority": 1,
+            }],
+        }
+        resp = self._sign_and_post(payload)
+        assert resp.status_code == 200
 
     def test_empty_events_list(self):
         payload = {"bot_id": "test_bot", "events": []}

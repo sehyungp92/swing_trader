@@ -79,6 +79,12 @@ class DailySnapshot:
     avg_exit_slippage_bps: Optional[float] = None
     avg_entry_latency_ms: Optional[float] = None
 
+    # Execution cascade
+    avg_signal_to_fill_ms: Optional[float] = None
+
+    # Experiment A/B tracking
+    experiment_breakdown: Optional[dict] = field(default=None)
+
     # Health
     error_count: int = 0
     uptime_pct: float = 100.0
@@ -191,6 +197,46 @@ class DailySnapshotBuilder:
                 data["pnl"] = round(data["pnl"], 4)
                 data["win_rate"] = round(data["wins"] / data["trades"], 4) if data["trades"] > 0 else 0
             snapshot.session_breakdown = session_data
+
+            # Execution cascade: avg signal-to-fill latency
+            stf_deltas = []
+            for t in completed:
+                tl = t.get("execution_timeline")
+                if isinstance(tl, dict):
+                    sig = tl.get("signal_generated_at")
+                    fill = tl.get("fill_confirmed_at")
+                    if sig and fill:
+                        try:
+                            from datetime import datetime as _dt
+                            t0 = _dt.fromisoformat(str(sig))
+                            t1 = _dt.fromisoformat(str(fill))
+                            delta_ms = (t1 - t0).total_seconds() * 1000
+                            if delta_ms >= 0:
+                                stf_deltas.append(delta_ms)
+                        except (ValueError, TypeError):
+                            pass
+            snapshot.avg_signal_to_fill_ms = (
+                round(sum(stf_deltas) / len(stf_deltas), 1) if stf_deltas else None
+            )
+
+            # Experiment A/B breakdown
+            exp_groups: Dict[str, dict] = {}
+            for t in completed:
+                eid = t.get("experiment_id") or ""
+                evar = t.get("experiment_variant") or ""
+                if not eid:
+                    continue
+                key = f"{eid}:{evar}" if evar else eid
+                if key not in exp_groups:
+                    exp_groups[key] = {"trades": 0, "pnl": 0.0, "wins": 0}
+                exp_groups[key]["trades"] += 1
+                exp_groups[key]["pnl"] += t.get("pnl", 0) or 0
+                if (t.get("pnl") or 0) > 0:
+                    exp_groups[key]["wins"] += 1
+            for data in exp_groups.values():
+                data["pnl"] = round(data["pnl"], 4)
+                data["win_rate"] = round(data["wins"] / data["trades"], 4) if data["trades"] > 0 else 0
+            snapshot.experiment_breakdown = exp_groups or None
 
         # --- PER-STRATEGY SUMMARY ---
         strategy_ids = sorted({t.get("strategy_id", "") for t in completed

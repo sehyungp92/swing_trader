@@ -5,6 +5,7 @@ Every payload is HMAC-SHA256 signed with canonicalized JSON (sort_keys=True).
 """
 from __future__ import annotations
 
+import gzip
 import hashlib
 import hmac as hmac_mod
 import json
@@ -22,6 +23,17 @@ except ImportError:
     requests = None  # type: ignore[assignment]
 
 logger = logging.getLogger("instrumentation.sidecar")
+
+_PRIORITY_MAP = {
+    "error": 1,
+    "trade": 3,
+    "missed_opportunity": 3,
+    "daily_snapshot": 3,
+    "process_quality": 4,
+    "post_exit": 4,
+    "coordinator_action": 4,
+    "sidecar_heartbeat": 4,
+}
 
 _DIR_TO_EVENT_TYPE = {
     "trades": "trade",
@@ -68,6 +80,13 @@ class Sidecar:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self.poll_interval = sc.get("poll_interval_seconds", 60)
+        self.heartbeat_every_n = sc.get("heartbeat_every_n_polls", 10)
+
+        # Heartbeat state
+        self._relay_reachable: Optional[bool] = None
+        self._last_successful_forward_at: Optional[str] = None
+        self._start_time = datetime.now(timezone.utc).isoformat()
+        self._poll_count = 0
 
     # --- Watermarks ---
 
@@ -145,12 +164,18 @@ class Sidecar:
             raw_str = f"{self.bot_id}|{exchange_ts}|{event_type}|{key}"
             event_id = hashlib.sha256(raw_str.encode()).hexdigest()[:16]
 
+        # Compute priority: trade exits elevated to 2, errors to 1
+        priority = _PRIORITY_MAP.get(event_type, 3)
+        if event_type == "trade" and raw_event.get("stage") == "exit":
+            priority = 2
+
         return {
             "event_id": event_id,
             "bot_id": self.bot_id,
             "event_type": event_type,
             "payload": json.dumps(raw_event, default=str),
             "exchange_timestamp": exchange_ts,
+            "priority": priority,
         }
 
     # --- Signing ---
@@ -177,23 +202,39 @@ class Sidecar:
         canonical = json.dumps(envelope, sort_keys=True)
         signature = self._sign_payload(canonical)
 
+        # gzip compress if it saves bytes
+        raw_bytes = canonical.encode()
+        compressed = gzip.compress(raw_bytes)
+        if len(compressed) < len(raw_bytes):
+            send_bytes = compressed
+            use_gzip = True
+        else:
+            send_bytes = raw_bytes
+            use_gzip = False
+
         headers = {
             "Content-Type": "application/json",
             "X-Bot-ID": self.bot_id,
             "X-Signature": signature,
         }
+        if use_gzip:
+            headers["Content-Encoding"] = "gzip"
 
         for attempt in range(self.retry_max):
             try:
                 response = requests.post(
                     self.relay_url,
-                    data=canonical.encode(),
+                    data=send_bytes,
                     headers=headers,
                     timeout=30,
                 )
                 if response.status_code == 200:
+                    self._relay_reachable = True
+                    self._last_successful_forward_at = datetime.now(timezone.utc).isoformat()
                     return True
                 elif response.status_code == 409:
+                    self._relay_reachable = True
+                    self._last_successful_forward_at = datetime.now(timezone.utc).isoformat()
                     return True  # duplicate, treat as success
                 elif response.status_code == 401:
                     logger.error("Authentication failed — check HMAC secret")
@@ -209,6 +250,7 @@ class Sidecar:
             backoff = self.retry_backoff_base * (2 ** attempt)
             time.sleep(min(backoff, 300))
 
+        self._relay_reachable = False
         return False
 
     # --- Main loop ---
@@ -256,7 +298,53 @@ class Sidecar:
                 self.run_once()
             except Exception as e:
                 logger.error("Sidecar run_once failed: %s", e)
+            self._poll_count += 1
+            if self._poll_count % self.heartbeat_every_n == 0:
+                try:
+                    self._emit_heartbeat()
+                except Exception as e:
+                    logger.debug("Heartbeat emission failed: %s", e)
             time.sleep(self.poll_interval)
+
+    def _compute_buffer_depth(self) -> int:
+        """Count unsent lines across all event files."""
+        total = 0
+        for filepath, event_type in self._get_event_files():
+            key = str(filepath)
+            last_sent = self.watermarks.get(key, 0)
+            try:
+                if filepath.suffix == ".jsonl":
+                    line_count = sum(1 for line in filepath.read_text().strip().split("\n") if line.strip())
+                    total += max(0, line_count - last_sent)
+                elif filepath.suffix == ".json" and last_sent == 0:
+                    total += 1
+            except OSError:
+                pass
+        return total
+
+    def _emit_heartbeat(self) -> None:
+        """Synthesize and send a heartbeat event."""
+        if not self.relay_url or requests is None:
+            return
+
+        heartbeat = {
+            "event_id": hashlib.sha256(
+                f"{self.bot_id}|heartbeat|{datetime.now(timezone.utc).isoformat()}".encode()
+            ).hexdigest()[:16],
+            "bot_id": self.bot_id,
+            "event_type": "sidecar_heartbeat",
+            "payload": json.dumps({
+                "relay_reachable": self._relay_reachable,
+                "last_successful_forward_at": self._last_successful_forward_at,
+                "buffer_depth": self._compute_buffer_depth(),
+                "uptime_since": self._start_time,
+                "poll_count": self._poll_count,
+            }),
+            "exchange_timestamp": datetime.now(timezone.utc).isoformat(),
+            "priority": _PRIORITY_MAP.get("sidecar_heartbeat", 4),
+        }
+
+        self._send_batch([heartbeat])
 
     def cleanup_old_watermarks(self) -> None:
         to_remove = [key for key in self.watermarks if not Path(key).exists()]

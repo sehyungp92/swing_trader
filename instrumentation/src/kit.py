@@ -92,6 +92,8 @@ class InstrumentationKit:
         experiment_id: Optional[str] = None,
         concurrent_positions_strategy: Optional[int] = None,
         correlated_pairs_detail: Optional[list] = None,
+        execution_timeline: Optional[dict] = None,
+        experiment_variant: Optional[str] = None,
     ) -> Any:
         """Log a trade entry with full instrumentation and enriched data.
 
@@ -192,6 +194,8 @@ class InstrumentationKit:
                 experiment_id=experiment_id,
                 concurrent_positions_strategy=concurrent_positions_strategy,
                 correlated_pairs_detail=correlated_pairs_detail,
+                execution_timeline=execution_timeline,
+                experiment_variant=experiment_variant,
                 **drawdown_ctx,
                 **session_ctx,
                 **gap_ctx,
@@ -376,6 +380,13 @@ class InstrumentationKit:
             return regime if regime in {"trending_up", "trending_down", "ranging", "volatile", "unknown"} else "unknown"
 
         return safe_instrument(_classify_impl) or "unknown"
+
+    def record_close(self, symbol: str, close_price: float) -> None:
+        """Record previous day's closing price for overnight gap tracking."""
+        def _impl():
+            if self.ctx and self.ctx.overnight_gap_tracker:
+                self.ctx.overnight_gap_tracker.record_close(symbol, close_price)
+        safe_instrument(_impl)
 
     def capture_snapshot(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Capture a market snapshot for a symbol.

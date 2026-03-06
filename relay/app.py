@@ -1,9 +1,12 @@
 """FastAPI relay application — buffers events from trading bots."""
+import gzip
 import logging
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Header, Request, Response
 from pydantic import BaseModel
+from starlette.middleware.gzip import GZipMiddleware
 
 from relay.auth import HMACAuth
 from relay.db.store import EventStore
@@ -20,6 +23,7 @@ class EventIn(BaseModel):
     event_type: str = "unknown"
     payload: str = "{}"
     exchange_timestamp: str = ""
+    priority: int = 3
 
 
 class IngestRequest(BaseModel):
@@ -51,10 +55,23 @@ def create_relay_app(
 ) -> FastAPI:
     """Create and configure the relay FastAPI app."""
 
-    app = FastAPI(title="Trading Relay", version="1.0.0")
     store = EventStore(db_path=db_path)
     auth = HMACAuth(shared_secrets=shared_secrets)
     limiter = RateLimiter(max_requests=max_requests_per_minute)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # Startup: purge old acked events
+        try:
+            purged = store.purge_acked(days=7)
+            if purged:
+                logger.info("Startup purge: removed %d old acked events", purged)
+        except Exception as e:
+            logger.warning("Startup purge failed: %s", e)
+        yield
+
+    app = FastAPI(title="Trading Relay", version="1.0.0", lifespan=lifespan)
+    app.add_middleware(GZipMiddleware, minimum_size=500)
 
     @app.post("/events", response_model=IngestResponse)
     async def ingest_events(
@@ -62,7 +79,17 @@ def create_relay_app(
         x_signature: str = Header(default=""),
     ):
         """Receive HMAC-signed event batches from trading bots."""
-        body = await request.body()
+        raw_body = await request.body()
+
+        # Decompress gzip if Content-Encoding header present
+        content_encoding = request.headers.get("content-encoding", "")
+        if content_encoding == "gzip":
+            try:
+                body = gzip.decompress(raw_body)
+            except Exception:
+                return Response(status_code=400, content="Invalid gzip data")
+        else:
+            body = raw_body
 
         # Parse body to get bot_id for auth lookup
         try:
@@ -72,7 +99,7 @@ def create_relay_app(
         except Exception:
             return Response(status_code=400, content="Invalid JSON")
 
-        # HMAC verification
+        # HMAC verification (always against decompressed canonical JSON)
         if auth.enabled and not auth.verify(body, x_signature, bot_id):
             return Response(status_code=401, content="Invalid signature")
 
@@ -119,5 +146,11 @@ def create_relay_app(
         """Health check endpoint."""
         pending = store.count_pending()
         return {"status": "ok", "pending_events": pending}
+
+    @app.post("/admin/purge")
+    async def admin_purge(days: int = 7):
+        """Purge acked events older than N days."""
+        deleted = store.purge_acked(days=days)
+        return {"status": "ok", "deleted": deleted, "retention_days": days}
 
     return app

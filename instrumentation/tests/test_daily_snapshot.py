@@ -209,6 +209,54 @@ class TestDailySnapshot:
         assert types["tighten_stop_be"] == 2
         assert types["size_boost"] == 1
 
+    def test_avg_signal_to_fill_ms(self):
+        self._write_trades([
+            {"stage": "exit", "trade_id": "t1", "pnl": 100,
+             "execution_timeline": {
+                 "signal_generated_at": "2026-03-01T10:00:00.000000",
+                 "fill_confirmed_at": "2026-03-01T10:00:00.250000",
+             }},
+            {"stage": "exit", "trade_id": "t2", "pnl": -50,
+             "execution_timeline": {
+                 "signal_generated_at": "2026-03-01T11:00:00.000000",
+                 "fill_confirmed_at": "2026-03-01T11:00:00.750000",
+             }},
+        ])
+        snap = self.builder.build(self.today)
+        assert snap.avg_signal_to_fill_ms is not None
+        assert abs(snap.avg_signal_to_fill_ms - 500.0) < 1.0  # avg of 250ms + 750ms
+
+    def test_avg_signal_to_fill_ms_none_when_no_timelines(self):
+        self._write_trades([
+            {"stage": "exit", "trade_id": "t1", "pnl": 100},
+        ])
+        snap = self.builder.build(self.today)
+        assert snap.avg_signal_to_fill_ms is None
+
+    def test_experiment_breakdown(self):
+        self._write_trades([
+            {"stage": "exit", "trade_id": "t1", "pnl": 100,
+             "experiment_id": "exp1", "experiment_variant": "A"},
+            {"stage": "exit", "trade_id": "t2", "pnl": -50,
+             "experiment_id": "exp1", "experiment_variant": "A"},
+            {"stage": "exit", "trade_id": "t3", "pnl": 200,
+             "experiment_id": "exp1", "experiment_variant": "B"},
+        ])
+        snap = self.builder.build(self.today)
+        assert snap.experiment_breakdown is not None
+        assert "exp1:A" in snap.experiment_breakdown
+        assert snap.experiment_breakdown["exp1:A"]["trades"] == 2
+        assert snap.experiment_breakdown["exp1:A"]["wins"] == 1
+        assert "exp1:B" in snap.experiment_breakdown
+        assert snap.experiment_breakdown["exp1:B"]["trades"] == 1
+
+    def test_experiment_breakdown_none_when_no_experiments(self):
+        self._write_trades([
+            {"stage": "exit", "trade_id": "t1", "pnl": 100},
+        ])
+        snap = self.builder.build(self.today)
+        assert snap.experiment_breakdown is None
+
     def test_overlay_excluded_from_per_strategy(self):
         self._write_trades([
             {"stage": "exit", "trade_id": "t1", "pnl": 100, "fees_paid": 0,

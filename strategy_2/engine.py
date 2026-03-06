@@ -532,6 +532,8 @@ class HelixEngine:
                 self.daily_states[sym] = compute_daily_state(
                     closes, highs, lows, prev, last_date,
                 )
+                if self._kit and len(closes) > 0:
+                    self._kit.record_close(sym, float(closes[-1]))
                 # Track regime streaks for USO gates (2G)
                 new_regime = self.daily_states[sym].regime
                 prev_regime = self._prev_regimes.get(sym)

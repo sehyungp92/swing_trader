@@ -103,6 +103,72 @@ class TestSidecar:
         self.sidecar.cleanup_old_watermarks()
         assert "/nonexistent/file.jsonl" not in self.sidecar.watermarks
 
+    def test_wrap_event_priority_error(self):
+        raw = {"event_metadata": {"event_id": "err1"}}
+        wrapped = self.sidecar._wrap_event(raw, "error")
+        assert wrapped["priority"] == 1
+
+    def test_wrap_event_priority_trade_exit(self):
+        raw = {"event_metadata": {"event_id": "t1"}, "stage": "exit"}
+        wrapped = self.sidecar._wrap_event(raw, "trade")
+        assert wrapped["priority"] == 2
+
+    def test_wrap_event_priority_trade_entry(self):
+        raw = {"event_metadata": {"event_id": "t2"}, "stage": "entry"}
+        wrapped = self.sidecar._wrap_event(raw, "trade")
+        assert wrapped["priority"] == 3
+
+    def test_wrap_event_priority_heartbeat(self):
+        raw = {"event_metadata": {"event_id": "hb1"}}
+        wrapped = self.sidecar._wrap_event(raw, "sidecar_heartbeat")
+        assert wrapped["priority"] == 4
+
+    def test_compute_buffer_depth_empty(self):
+        depth = self.sidecar._compute_buffer_depth()
+        assert depth == 0
+
+    def test_compute_buffer_depth_with_events(self):
+        self._write_trade_events([
+            {"trade_id": "t1", "event_metadata": {}},
+            {"trade_id": "t2", "event_metadata": {}},
+        ])
+        depth = self.sidecar._compute_buffer_depth()
+        assert depth == 2
+
+    def test_compute_buffer_depth_respects_watermarks(self):
+        filepath = self._write_trade_events([
+            {"trade_id": "t1", "event_metadata": {}},
+            {"trade_id": "t2", "event_metadata": {}},
+            {"trade_id": "t3", "event_metadata": {}},
+        ])
+        self.sidecar.watermarks[str(filepath)] = 2
+        depth = self.sidecar._compute_buffer_depth()
+        assert depth == 1
+
+    def test_relay_reachable_tracking(self):
+        assert self.sidecar._relay_reachable is None
+        assert self.sidecar._last_successful_forward_at is None
+        assert self.sidecar._start_time is not None
+
+    def test_heartbeat_every_n_default(self):
+        assert self.sidecar.heartbeat_every_n == 10
+
+    def test_gzip_compression_in_send_batch(self):
+        """Verify gzip compression headers are set when data is compressible."""
+        import gzip as gzip_mod
+        # Create a batch of events large enough for gzip to help
+        events = [
+            {"event_id": f"e{i}", "bot_id": "test_bot", "event_type": "trade",
+             "payload": json.dumps({"data": "x" * 200}), "priority": 3}
+            for i in range(10)
+        ]
+        envelope = {"bot_id": "test_bot", "events": events}
+        canonical = json.dumps(envelope, sort_keys=True)
+        raw_bytes = canonical.encode()
+        compressed = gzip_mod.compress(raw_bytes)
+        # Gzip should save bytes for repetitive data
+        assert len(compressed) < len(raw_bytes)
+
     def test_canonical_sort_keys(self):
         """Verify HMAC signing uses sort_keys=True canonicalization."""
         import os

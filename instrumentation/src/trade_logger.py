@@ -86,6 +86,7 @@ class TradeEvent:
     exit_slippage_bps: Optional[float] = None
     entry_latency_ms: Optional[int] = None
     exit_latency_ms: Optional[int] = None
+    execution_timeline: Optional[dict] = None  # {signal_generated_at, oms_received_at, order_submitted_at, fill_confirmed_at}
 
     # Excursion tracking (B5, B9)
     mfe_price: Optional[float] = None
@@ -114,6 +115,7 @@ class TradeEvent:
 
     # Metadata (B11, S4)
     experiment_id: Optional[str] = None
+    experiment_variant: Optional[str] = None
     concurrent_positions_strategy: Optional[int] = None
     correlated_pairs_detail: Optional[list] = None
 

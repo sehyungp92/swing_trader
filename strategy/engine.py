@@ -365,6 +365,9 @@ class ATRSSEngine:
         daily = compute_daily_state(closes_d, highs_d, lows_d, prev_daily, cfg, last_daily_date)
         self.daily_states[sym] = daily
 
+        if self._kit and closes_d is not None and len(closes_d) > 0:
+            self._kit.record_close(sym, float(closes_d[-1]))
+
         # 3 – Compute hourly indicators
         hourly = compute_hourly_state(closes_h, highs_h, lows_h, daily, cfg, now, opens_h)
         self.hourly_states[sym] = hourly

@@ -1,8 +1,11 @@
 """SQLite event store for the relay service."""
+import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
@@ -19,6 +22,13 @@ class EventStore:
     def _init_db(self):
         conn = sqlite3.connect(self.db_path)
         conn.executescript(SCHEMA_PATH.read_text())
+        # Migration: add priority column to existing DBs
+        try:
+            conn.execute("ALTER TABLE events ADD COLUMN priority INTEGER NOT NULL DEFAULT 3")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_events_priority ON events(priority)")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
         conn.close()
 
     def _connect(self) -> sqlite3.Connection:
@@ -35,8 +45,8 @@ class EventStore:
             for event in events:
                 try:
                     conn.execute(
-                        """INSERT INTO events (event_id, bot_id, event_type, payload, exchange_timestamp, received_at)
-                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        """INSERT INTO events (event_id, bot_id, event_type, payload, exchange_timestamp, received_at, priority)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
                         (
                             event["event_id"],
                             event["bot_id"],
@@ -44,6 +54,7 @@ class EventStore:
                             event.get("payload", "{}"),
                             event.get("exchange_timestamp", ""),
                             datetime.now(timezone.utc).isoformat(),
+                            event.get("priority", 3),
                         ),
                     )
                     accepted += 1
@@ -79,7 +90,7 @@ class EventStore:
                 query += " AND bot_id = ?"
                 params.append(bot_id)
 
-            query += " ORDER BY id ASC LIMIT ?"
+            query += " ORDER BY priority ASC, id ASC LIMIT ?"
             params.append(limit)
 
             rows = conn.execute(query, params).fetchall()
@@ -110,5 +121,27 @@ class EventStore:
         try:
             row = conn.execute("SELECT COUNT(*) as cnt FROM events WHERE acked = 0").fetchone()
             return row["cnt"]
+        finally:
+            conn.close()
+
+    def purge_acked(self, days: int = 7) -> int:
+        """Delete acked events older than N days, then VACUUM."""
+        conn = self._connect()
+        try:
+            cutoff = datetime.now(timezone.utc).isoformat()
+            # Compute cutoff: subtract days from current time
+            from datetime import timedelta
+            cutoff_dt = datetime.now(timezone.utc) - timedelta(days=days)
+            cutoff = cutoff_dt.isoformat()
+            cursor = conn.execute(
+                "DELETE FROM events WHERE acked = 1 AND received_at < ?",
+                (cutoff,),
+            )
+            deleted = cursor.rowcount
+            conn.commit()
+            if deleted > 0:
+                conn.execute("VACUUM")
+                logger.info("Purged %d acked events older than %d days", deleted, days)
+            return deleted
         finally:
             conn.close()

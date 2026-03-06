@@ -225,6 +225,23 @@ class TestTradeEventEnrichment:
         evt = TradeEvent(trade_id="test", event_metadata={}, entry_snapshot={})
         assert evt.overlay_state is None
 
+    def test_execution_timeline_field(self):
+        evt = TradeEvent(trade_id="test", event_metadata={}, entry_snapshot={})
+        assert evt.execution_timeline is None
+        evt.execution_timeline = {
+            "signal_generated_at": "2026-03-01T10:00:00Z",
+            "fill_confirmed_at": "2026-03-01T10:00:00.500Z",
+        }
+        d = evt.to_dict()
+        assert d["execution_timeline"]["signal_generated_at"] == "2026-03-01T10:00:00Z"
+
+    def test_experiment_variant_field(self):
+        evt = TradeEvent(trade_id="test", event_metadata={}, entry_snapshot={})
+        assert evt.experiment_variant is None
+        evt.experiment_variant = "control"
+        d = evt.to_dict()
+        assert d["experiment_variant"] == "control"
+
     def test_overlay_state_kwarg_persisted(self):
         """overlay_state passed as kwarg should be persisted on the TradeEvent."""
         config = {
