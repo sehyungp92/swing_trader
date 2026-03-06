@@ -55,6 +55,9 @@ def create_relay_app(
 ) -> FastAPI:
     """Create and configure the relay FastAPI app."""
 
+    import time as _time
+    _start_mono = _time.monotonic()
+
     store = EventStore(db_path=db_path)
     auth = HMACAuth(shared_secrets=shared_secrets)
     limiter = RateLimiter(max_requests=max_requests_per_minute)
@@ -143,9 +146,19 @@ def create_relay_app(
 
     @app.get("/health")
     async def health():
-        """Health check endpoint."""
+        """Health check endpoint with enriched stats."""
         pending = store.count_pending()
-        return {"status": "ok", "pending_events": pending}
+        stats = store.get_stats()
+        uptime = _time.monotonic() - _start_mono
+        return {
+            "status": "ok",
+            "pending_events": pending,
+            "per_bot_pending": stats["per_bot_pending"],
+            "last_event_per_bot": stats["last_event_per_bot"],
+            "oldest_pending_age_seconds": stats["oldest_pending_age_seconds"],
+            "db_size_bytes": stats["db_size_bytes"],
+            "uptime_seconds": round(uptime, 1),
+        }
 
     @app.post("/admin/purge")
     async def admin_purge(days: int = 7):

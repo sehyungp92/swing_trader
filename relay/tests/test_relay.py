@@ -123,6 +123,27 @@ class TestEventStore:
         deleted = self.store.purge_acked(days=7)
         assert deleted == 0
 
+    def test_get_stats_empty_db(self):
+        stats = self.store.get_stats()
+        assert stats["per_bot_pending"] == {}
+        assert stats["last_event_per_bot"] == {}
+        assert stats["oldest_pending_age_seconds"] == 0
+        assert stats["db_size_bytes"] > 0
+
+    def test_get_stats_with_events(self):
+        self.store.insert_events([
+            {"event_id": "s1", "bot_id": "bot1", "event_type": "trade", "payload": "{}"},
+            {"event_id": "s2", "bot_id": "bot1", "event_type": "trade", "payload": "{}"},
+            {"event_id": "s3", "bot_id": "bot2", "event_type": "trade", "payload": "{}"},
+        ])
+        stats = self.store.get_stats()
+        assert stats["per_bot_pending"]["bot1"] == 2
+        assert stats["per_bot_pending"]["bot2"] == 1
+        assert "bot1" in stats["last_event_per_bot"]
+        assert "bot2" in stats["last_event_per_bot"]
+        assert stats["oldest_pending_age_seconds"] >= 0
+        assert stats["db_size_bytes"] > 0
+
     def test_filter_by_bot_id(self):
         self.store.insert_events([
             {"event_id": "e1", "bot_id": "bot1", "event_type": "trade", "payload": "{}"},
@@ -381,6 +402,58 @@ class TestRelayAPI:
         }
         resp = self._sign_and_post(payload)
         assert resp.status_code == 200
+
+    def test_health_enriched_fields(self):
+        resp = self.client.get("/health")
+        assert resp.status_code == 200
+        data = resp.json()
+        expected_keys = {
+            "status", "pending_events", "per_bot_pending",
+            "last_event_per_bot", "oldest_pending_age_seconds",
+            "db_size_bytes", "uptime_seconds",
+        }
+        assert set(data.keys()) == expected_keys
+        assert isinstance(data["per_bot_pending"], dict)
+        assert isinstance(data["last_event_per_bot"], dict)
+        assert isinstance(data["oldest_pending_age_seconds"], (int, float))
+        assert isinstance(data["db_size_bytes"], int)
+        assert isinstance(data["uptime_seconds"], (int, float))
+
+    def test_health_per_bot_counts(self):
+        for i, bot in enumerate(["test_bot", "test_bot", "other_bot"]):
+            payload = {
+                "bot_id": bot,
+                "events": [{
+                    "event_id": f"evt-hpc-{i}",
+                    "bot_id": bot,
+                    "event_type": "trade",
+                    "payload": "{}",
+                }],
+            }
+            body = json.dumps(payload, sort_keys=True)
+            secret = self.secret if bot == "test_bot" else "other-secret"
+            sig = hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
+            self.client.post(
+                "/events", content=body,
+                headers={"Content-Type": "application/json", "X-Signature": sig},
+            )
+        resp = self.client.get("/health")
+        data = resp.json()
+        # test_bot has valid HMAC so its 2 events are accepted;
+        # other_bot has wrong secret so its event is rejected (401)
+        assert data["per_bot_pending"].get("test_bot", 0) == 2
+
+    def test_health_empty_db_zeros(self):
+        resp = self.client.get("/health")
+        data = resp.json()
+        assert data["per_bot_pending"] == {}
+        assert data["oldest_pending_age_seconds"] == 0
+        assert data["pending_events"] == 0
+
+    def test_health_uptime_present(self):
+        resp = self.client.get("/health")
+        data = resp.json()
+        assert data["uptime_seconds"] >= 0
 
     def test_empty_events_list(self):
         payload = {"bot_id": "test_bot", "events": []}

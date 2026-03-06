@@ -1,5 +1,6 @@
 """SQLite event store for the relay service."""
 import logging
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -121,6 +122,47 @@ class EventStore:
         try:
             row = conn.execute("SELECT COUNT(*) as cnt FROM events WHERE acked = 0").fetchone()
             return row["cnt"]
+        finally:
+            conn.close()
+
+    def get_stats(self) -> dict:
+        """Return enriched health stats: per-bot pending, last event times, oldest age, DB size."""
+        conn = self._connect()
+        try:
+            # Per-bot pending counts
+            rows = conn.execute(
+                "SELECT bot_id, COUNT(*) as cnt FROM events WHERE acked = 0 GROUP BY bot_id"
+            ).fetchall()
+            per_bot_pending = {r["bot_id"]: r["cnt"] for r in rows}
+
+            # Last event timestamp per bot (all events, not just pending)
+            rows = conn.execute(
+                "SELECT bot_id, MAX(received_at) as last_ts FROM events GROUP BY bot_id"
+            ).fetchall()
+            last_event_per_bot = {r["bot_id"]: r["last_ts"] for r in rows}
+
+            # Oldest pending event age in seconds
+            row = conn.execute(
+                "SELECT MIN(received_at) as oldest FROM events WHERE acked = 0"
+            ).fetchone()
+            if row["oldest"]:
+                oldest_dt = datetime.fromisoformat(row["oldest"])
+                oldest_age = (datetime.now(timezone.utc) - oldest_dt).total_seconds()
+            else:
+                oldest_age = 0.0
+
+            # DB file size
+            try:
+                db_size = os.path.getsize(self.db_path)
+            except OSError:
+                db_size = 0
+
+            return {
+                "per_bot_pending": per_bot_pending,
+                "last_event_per_bot": last_event_per_bot,
+                "oldest_pending_age_seconds": round(oldest_age, 1),
+                "db_size_bytes": db_size,
+            }
         finally:
             conn.close()
 
