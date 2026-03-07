@@ -204,6 +204,7 @@ class KeltnerEngine:
         if self._kit:
             for sym in self._config:
                 self._kit.capture_snapshot(sym)
+                self._kit.classify_regime(sym)
 
     # ------------------------------------------------------------------
     # Per-symbol daily logic
@@ -275,6 +276,23 @@ class KeltnerEngine:
 
         direction = signals.entry_signal(state, cfg)
         if direction == Direction.FLAT:
+            # Log missed if price was outside Keltner bands but volume filter blocked
+            if self._kit:
+                vol_blocked = (cfg.volume_filter and state.volume_sma > 0
+                               and state.volume < state.volume_sma)
+                price_outside = (state.close > state.kelt_upper
+                                 or state.close < state.kelt_lower)
+                if vol_blocked and price_outside:
+                    missed_side = "LONG" if state.close > state.kelt_upper else "SHORT"
+                    self._kit.log_missed(
+                        pair=symbol,
+                        side=missed_side,
+                        signal="keltner_breakout",
+                        signal_id=f"{symbol}_vol_filter_{datetime.now(timezone.utc).date()}",
+                        signal_strength=0.0,
+                        blocked_by="volume_filter",
+                        block_reason=f"volume {state.volume:.0f} < SMA {state.volume_sma:.0f}",
+                    )
             return
 
         await self._submit_entry(symbol, state, direction, cfg)
@@ -408,6 +426,18 @@ class KeltnerEngine:
                 "%s: %s entry %s submitted — qty=%d, est_stop=%.2f",
                 self._strategy_id, symbol, direction.name, qty, stop_price,
             )
+
+            if self._kit:
+                self._kit.on_order_event(
+                    order_id=receipt.oms_order_id,
+                    pair=symbol,
+                    side="LONG" if direction == Direction.LONG else "SHORT",
+                    order_type="MARKET",
+                    status="SUBMITTED",
+                    requested_qty=float(qty),
+                    requested_price=state.close,
+                    strategy_id=self._strategy_id,
+                )
 
     # ------------------------------------------------------------------
     # Protective stop
@@ -625,7 +655,7 @@ class KeltnerEngine:
                 elif evt in (OMSEventType.ORDER_CANCELLED,
                              OMSEventType.ORDER_REJECTED,
                              OMSEventType.ORDER_EXPIRED):
-                    self._on_terminal(symbol, role, oms_order_id)
+                    self._on_terminal(symbol, role, oms_order_id, evt)
 
             except Exception:
                 logger.exception("%s: Error processing OMS event",
@@ -748,6 +778,20 @@ class KeltnerEngine:
                     concurrent_positions_strategy=len(self.positions),
                 )
 
+                self._kit.on_order_event(
+                    order_id=oms_order_id,
+                    pair=symbol,
+                    side="LONG" if direction == Direction.LONG else "SHORT",
+                    order_type="MARKET",
+                    status="FILLED",
+                    requested_qty=float(fill_qty),
+                    filled_qty=float(fill_qty),
+                    requested_price=fill_price,
+                    fill_price=fill_price,
+                    related_trade_id=f"{symbol}_{pos.entry_time.isoformat()}",
+                    strategy_id=self._strategy_id,
+                )
+
             # Submit protective stop
             await self._submit_protective_stop(symbol, pos)
 
@@ -784,6 +828,20 @@ class KeltnerEngine:
                         pnl_pct=_pnl_pct,
                     )
 
+                    self._kit.on_order_event(
+                        order_id=oms_order_id,
+                        pair=symbol,
+                        side="SELL" if pos.direction == Direction.LONG else "BUY",
+                        order_type="STOP",
+                        status="FILLED",
+                        requested_qty=float(pos.qty),
+                        filled_qty=float(fill_qty),
+                        requested_price=pos.current_stop,
+                        fill_price=fill_price,
+                        related_trade_id=tid,
+                        strategy_id=self._strategy_id,
+                    )
+
         elif role == "signal_exit":
             pos = self.positions.pop(symbol, None)
             if pos:
@@ -817,18 +875,49 @@ class KeltnerEngine:
                         pnl_pct=_pnl_pct,
                     )
 
+                    self._kit.on_order_event(
+                        order_id=oms_order_id,
+                        pair=symbol,
+                        side="SELL" if pos.direction == Direction.LONG else "BUY",
+                        order_type="MARKET",
+                        status="FILLED",
+                        requested_qty=float(pos.qty),
+                        filled_qty=float(fill_qty),
+                        requested_price=fill_price,
+                        fill_price=fill_price,
+                        related_trade_id=tid,
+                        strategy_id=self._strategy_id,
+                    )
+
         # Cleanup order tracking
         self._order_to_symbol.pop(oms_order_id, None)
         self._order_role.pop(oms_order_id, None)
 
-    def _on_terminal(self, symbol: str, role: str, oms_order_id: str) -> None:
+    def _on_terminal(self, symbol: str, role: str, oms_order_id: str, evt: Any = None) -> None:
         """Handle cancel/reject/expire — clean up pending state."""
         if role == "entry":
-            self._pending_entry.pop(symbol, None)
+            ctx = self._pending_entry.pop(symbol, None)
             logger.info(
-                "%s: %s entry order terminal (cancel/reject/expire)",
-                self._strategy_id, symbol,
+                "%s: %s entry order terminal (%s)",
+                self._strategy_id, symbol, evt,
             )
+
+            if self._kit and ctx:
+                status_map = {
+                    OMSEventType.ORDER_REJECTED: "REJECTED",
+                    OMSEventType.ORDER_CANCELLED: "CANCELLED",
+                    OMSEventType.ORDER_EXPIRED: "EXPIRED",
+                }
+                self._kit.on_order_event(
+                    order_id=oms_order_id,
+                    pair=symbol,
+                    side="LONG" if ctx.get("direction") == Direction.LONG else "SHORT",
+                    order_type="MARKET",
+                    status=status_map.get(evt, "CANCELLED"),
+                    requested_qty=0,
+                    requested_price=ctx.get("close", 0),
+                    strategy_id=self._strategy_id,
+                )
         elif role == "stop":
             # Stop cancelled externally — position still open, will be
             # re-evaluated next daily cycle

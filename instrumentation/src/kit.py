@@ -12,9 +12,11 @@ Never crashes trading.
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
 
 from .context import InstrumentationContext
 from .hooks import safe_instrument
@@ -408,3 +410,251 @@ class InstrumentationKit:
             return snapshot.to_dict() if hasattr(snapshot, 'to_dict') else None
 
         return safe_instrument(_capture_impl)
+
+    def on_order_event(
+        self,
+        order_id: str,
+        pair: str,
+        side: str,
+        order_type: str,
+        status: str,
+        requested_qty: float,
+        filled_qty: float = 0.0,
+        requested_price: float | None = None,
+        fill_price: float | None = None,
+        reject_reason: str = "",
+        latency_ms: float | None = None,
+        related_trade_id: str = "",
+        strategy_id: str = "",
+        order_action: str = "NEW",
+        coordinator_triggered: bool = False,
+        coordinator_rule: str = "",
+        modification_details: dict | None = None,
+        exchange_timestamp=None,
+        bar_id: str | None = None,
+    ) -> None:
+        """Record an order lifecycle event. Auto-captures context. Fire-and-forget."""
+        try:
+            if self.ctx is None or self.ctx.order_logger is None:
+                return
+
+            # Auto-capture context from existing trackers
+            dd_tier = ""
+            if self.ctx.drawdown_tracker is not None:
+                dd_ctx = self.ctx.drawdown_tracker.get_entry_context()
+                dd_tier = dd_ctx.get("drawdown_tier_at_entry", "")
+
+            market_session = ""
+            from .session_classifier import SessionClassifier
+            session_ctx = SessionClassifier.classify(datetime.now())
+            market_session = session_ctx.get("market_session", "")
+
+            overlay = None
+            if self.ctx.overlay_state_provider is not None:
+                try:
+                    overlay = self.ctx.overlay_state_provider()
+                except Exception:
+                    pass
+
+            self.ctx.order_logger.log_order(
+                order_id=order_id,
+                pair=pair,
+                side=side,
+                order_type=order_type,
+                status=status,
+                requested_qty=requested_qty,
+                filled_qty=filled_qty,
+                requested_price=requested_price,
+                fill_price=fill_price,
+                reject_reason=reject_reason,
+                latency_ms=latency_ms,
+                related_trade_id=related_trade_id,
+                strategy_id=strategy_id,
+                order_action=order_action,
+                coordinator_triggered=coordinator_triggered,
+                coordinator_rule=coordinator_rule,
+                modification_details=modification_details,
+                overlay_state=overlay,
+                drawdown_tier=dd_tier,
+                market_session=market_session,
+                exchange_timestamp=exchange_timestamp,
+                bar_id=bar_id,
+            )
+        except Exception:
+            pass  # instrumentation must never affect trading
+
+    def emit_heartbeat(
+        self,
+        active_positions: int,
+        open_orders: int,
+        uptime_s: float,
+        error_count_1h: int,
+        positions: list[dict] | None = None,
+        portfolio_exposure: dict | None = None,
+    ) -> None:
+        """Emit a heartbeat event with optional position and exposure data.
+
+        If positions/portfolio_exposure are not provided, attempts to auto-build
+        from internal state. Falls back to basic heartbeat on any error.
+        Never raises.
+        """
+        try:
+            if self.ctx is None:
+                return
+
+            if positions is None and hasattr(self.ctx, "portfolio_tracker") and self.ctx.portfolio_tracker:
+                positions, portfolio_exposure = self._build_position_snapshot()
+
+            heartbeat_data = {
+                "bot_id": self.ctx.data_dir.split("/")[0] if isinstance(self.ctx.data_dir, str) else "swing_trader",
+                "active_positions": active_positions,
+                "open_orders": open_orders,
+                "uptime_s": uptime_s,
+                "error_count_1h": error_count_1h,
+            }
+
+            if positions is not None:
+                heartbeat_data["positions"] = positions
+            if portfolio_exposure is not None:
+                heartbeat_data["portfolio_exposure"] = portfolio_exposure
+
+            # Write to heartbeat JSONL
+            hb_dir = Path(self.ctx.data_dir) / "heartbeat"
+            hb_dir.mkdir(parents=True, exist_ok=True)
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            filepath = hb_dir / f"heartbeat_{today}.jsonl"
+            with open(filepath, "a", encoding="utf-8") as f:
+                f.write(json.dumps(heartbeat_data, default=str) + "\n")
+
+        except Exception:
+            # Fallback: try to emit basic heartbeat without position data
+            try:
+                hb_dir = Path(self.ctx.data_dir) / "heartbeat"
+                hb_dir.mkdir(parents=True, exist_ok=True)
+                today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                filepath = hb_dir / f"heartbeat_{today}.jsonl"
+                basic = {
+                    "active_positions": active_positions,
+                    "open_orders": open_orders,
+                    "uptime_s": uptime_s,
+                    "error_count_1h": error_count_1h,
+                }
+                with open(filepath, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(basic, default=str) + "\n")
+            except Exception:
+                pass
+
+    def _build_position_snapshot(self) -> tuple[list[dict], dict]:
+        """Build position list and portfolio exposure from current state."""
+        raw_positions = self.ctx.portfolio_tracker.get_open_positions()
+
+        positions = []
+        for pos in raw_positions:
+            current_price = pos.entry_price
+            if self.ctx.snapshot_service:
+                current = self.ctx.snapshot_service.get_latest(pos.symbol)
+                if current:
+                    current_price = current.last_trade_price
+
+            is_long = pos.side == "LONG"
+            unrealized = (current_price - pos.entry_price) * pos.qty if is_long else \
+                         (pos.entry_price - current_price) * pos.qty
+
+            duration_minutes = 0
+            if hasattr(pos, "entry_time") and pos.entry_time:
+                duration_minutes = int(
+                    (datetime.now(timezone.utc) - pos.entry_time).total_seconds() / 60
+                )
+
+            dd_pct = 0.0
+            size_mult = 1.0
+            if self.ctx.drawdown_tracker:
+                dd_pct = getattr(self.ctx.drawdown_tracker, "drawdown_pct", 0.0)
+                size_mult = getattr(self.ctx.drawdown_tracker, "position_size_multiplier", 1.0)
+
+            positions.append({
+                "pair": pos.symbol,
+                "side": pos.side,
+                "qty": pos.qty,
+                "entry_price": pos.entry_price,
+                "current_price": current_price,
+                "unrealized_pnl": round(unrealized, 4),
+                "unrealized_pnl_pct": round(
+                    unrealized / (pos.entry_price * pos.qty) * 100, 4
+                ) if pos.entry_price * pos.qty > 0 else 0.0,
+                "duration_minutes": duration_minutes,
+                "strategy_id": getattr(pos, "strategy_id", ""),
+                "is_overlay": getattr(pos, "strategy_id", "") == "OVERLAY",
+                "drawdown_pct_current": dd_pct,
+                "position_size_multiplier": size_mult,
+            })
+
+        # Build portfolio exposure
+        dd_ctx = {}
+        if self.ctx.drawdown_tracker:
+            dd_ctx = self.ctx.drawdown_tracker.get_entry_context()
+
+        from .session_classifier import SessionClassifier
+        session_ctx = SessionClassifier.classify(datetime.now())
+
+        overlay = {}
+        if self.ctx.overlay_state_provider:
+            try:
+                overlay = self.ctx.overlay_state_provider()
+            except Exception:
+                pass
+
+        main_positions = [p for p in positions if not p["is_overlay"]]
+        overlay_positions = [p for p in positions if p["is_overlay"]]
+
+        coordinator_rules: list = []
+        if hasattr(self.ctx, "coordinator") and self.ctx.coordinator:
+            try:
+                coordinator_rules = self.ctx.coordinator.get_active_rules()
+            except Exception:
+                pass
+
+        # Group by strategy
+        by_strategy: dict[str, dict] = {}
+        for p in positions:
+            sid = p["strategy_id"]
+            if sid not in by_strategy:
+                by_strategy[sid] = {
+                    "positions": 0,
+                    "unrealized_pnl": 0.0,
+                    "symbols": [],
+                }
+            by_strategy[sid]["positions"] += 1
+            by_strategy[sid]["unrealized_pnl"] += p["unrealized_pnl"]
+            by_strategy[sid]["symbols"].append(p["pair"])
+
+        account_equity = getattr(self.ctx.drawdown_tracker, "current_equity", None) or 1.0
+        total_exposure = sum(p["qty"] * p["entry_price"] for p in positions)
+
+        exposure = {
+            "total_positions": len(positions),
+            "main_strategy_positions": len(main_positions),
+            "overlay_positions": len(overlay_positions),
+            "total_exposure_pct": round(total_exposure / account_equity * 100, 2),
+            "main_exposure_pct": round(
+                sum(p["qty"] * p["entry_price"] for p in main_positions)
+                / account_equity * 100, 2
+            ),
+            "overlay_exposure_pct": round(
+                sum(p["qty"] * p["entry_price"] for p in overlay_positions)
+                / account_equity * 100, 2
+            ),
+            "total_unrealized_pnl": round(
+                sum(p["unrealized_pnl"] for p in positions), 4
+            ),
+            "daily_realized_pnl": getattr(
+                getattr(self.ctx, "daily_pnl_tracker", None), "realized_pnl", 0.0
+            ),
+            "drawdown_tier": dd_ctx.get("drawdown_tier_at_entry", "NORMAL"),
+            "market_session": session_ctx.get("market_session", ""),
+            "overlay_state": overlay,
+            "coordinator_active_rules": coordinator_rules,
+            "by_strategy": by_strategy,
+        }
+
+        return positions, exposure

@@ -409,6 +409,7 @@ async def main() -> None:
     # -------------------------------------------------------------------
     _daily_snapshot_task = None
     _backfill_task = None
+    _heartbeat_task = None
 
     if instrumentation_ctx is not None:
         async def _run_daily_snapshot() -> None:
@@ -451,8 +452,43 @@ async def main() -> None:
                 except asyncio.CancelledError:
                     break
 
+        async def _run_heartbeat() -> None:
+            """Emit portfolio heartbeat every 60 seconds."""
+            import time as _time
+            start_time = _time.monotonic()
+            error_counter = 0
+            while True:
+                try:
+                    await asyncio.sleep(60)
+                    uptime = _time.monotonic() - start_time
+                    active_positions = (
+                        len(getattr(atrss_engine, "positions", {}))
+                        + len(getattr(helix_engine, "active_setups", {}))
+                        + len(getattr(breakout_engine, "active_setups", {}))
+                        + len(getattr(s5_pb_engine, "positions", {}))
+                        + len(getattr(s5_dual_engine, "positions", {}))
+                    )
+                    open_orders = (
+                        len(getattr(atrss_engine, "pending_orders", {}))
+                        + len(getattr(helix_engine, "pending_setups", {}))
+                        + len(getattr(s5_pb_engine, "_pending_entry", {}))
+                        + len(getattr(s5_dual_engine, "_pending_entry", {}))
+                    )
+                    atrss_kit.emit_heartbeat(
+                        active_positions=active_positions,
+                        open_orders=open_orders,
+                        uptime_s=uptime,
+                        error_count_1h=error_counter,
+                    )
+                except asyncio.CancelledError:
+                    break
+                except Exception:
+                    error_counter += 1
+                    await asyncio.sleep(60)
+
         _daily_snapshot_task = asyncio.create_task(_run_daily_snapshot())
         _backfill_task = asyncio.create_task(_run_backfill())
+        _heartbeat_task = asyncio.create_task(_run_heartbeat())
         logger.info("Instrumentation periodic tasks started")
 
     # -------------------------------------------------------------------
@@ -496,6 +532,8 @@ async def main() -> None:
         _daily_snapshot_task.cancel()
     if _backfill_task is not None:
         _backfill_task.cancel()
+    if _heartbeat_task is not None:
+        _heartbeat_task.cancel()
 
     # 0b. Build final daily snapshot before engines stop
     if instrumentation_ctx is not None:

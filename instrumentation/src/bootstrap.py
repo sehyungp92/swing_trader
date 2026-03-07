@@ -70,9 +70,11 @@ def bootstrap_instrumentation(
     from .drawdown_tracker import DrawdownTracker
     from .overnight_gap_tracker import OvernightGapTracker
     from .coordination_logger import CoordinationLogger
+    from .order_logger import OrderLogger
     drawdown_tracker = DrawdownTracker(initial_equity=initial_equity)
     gap_tracker = OvernightGapTracker()
     coordination_logger = CoordinationLogger(config)
+    order_logger = OrderLogger(config)
 
     ctx = InstrumentationContext(
         snapshot_service=snapshot_service,
@@ -85,6 +87,7 @@ def bootstrap_instrumentation(
         drawdown_tracker=drawdown_tracker,
         overnight_gap_tracker=gap_tracker,
         coordination_logger=coordination_logger,
+        order_logger=order_logger,
         data_dir=config.get("data_dir", "instrumentation/data"),
     )
 

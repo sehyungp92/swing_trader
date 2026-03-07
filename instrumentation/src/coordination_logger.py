@@ -59,6 +59,21 @@ class CoordinationLogger:
         self.data_dir = Path(config.get("data_dir", "instrumentation/data")) / "coordination"
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.data_source_id = config.get("data_source_id", "ibkr_execution")
+        self._event_count = 0
+
+    _ORDER_MODIFICATION_ACTIONS = frozenset({
+        "tighten_stop_be", "loosen_stop", "adjust_size", "size_boost",
+        "force_exit", "cancel_order",
+    })
+
+    _ORDER_ACTION_MAP = {
+        "tighten_stop_be": "MODIFY",
+        "loosen_stop": "MODIFY",
+        "adjust_size": "MODIFY",
+        "size_boost": "MODIFY",
+        "force_exit": "NEW",
+        "cancel_order": "CANCEL",
+    }
 
     def log_action(
         self,
@@ -69,8 +84,11 @@ class CoordinationLogger:
         rule: str,
         details: Optional[dict] = None,
         outcome: str = "applied",
+        order_logger: object = None,
+        related_order_id: str = "",
+        related_trade_id: str = "",
     ) -> Optional[CoordinationEvent]:
-        """Log a coordination action. Never raises."""
+        """Log a coordination action and optionally emit an OrderEvent. Never raises."""
         try:
             now = datetime.now(timezone.utc)
             metadata = create_event_metadata(
@@ -94,6 +112,33 @@ class CoordinationLogger:
             )
 
             self._write_event(event)
+
+            # If the action resulted in an order modification, also log an OrderEvent
+            if (
+                outcome == "applied"
+                and order_logger is not None
+                and action in self._ORDER_MODIFICATION_ACTIONS
+            ):
+                try:
+                    order_logger.log_order(
+                        order_id=related_order_id or f"coord_{self._event_count}",
+                        pair=symbol,
+                        side="",
+                        order_type="STOP" if "stop" in action else "MARKET",
+                        status="SUBMITTED",
+                        requested_qty=0,
+                        strategy_id=target_strategy,
+                        order_action=self._ORDER_ACTION_MAP.get(action, "MODIFY"),
+                        coordinator_triggered=True,
+                        coordinator_rule=rule,
+                        modification_details=details,
+                    )
+                except Exception as e:
+                    logger.debug("OrderEvent emission from coordinator failed: %s", e)
+
+            if not hasattr(self, "_event_count"):
+                self._event_count = 0
+            self._event_count += 1
             return event
 
         except Exception as e:

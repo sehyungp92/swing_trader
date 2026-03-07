@@ -1045,6 +1045,18 @@ class HelixEngine:
             setup.primary_order_id = receipt.oms_order_id
             self._order_to_setup[receipt.oms_order_id] = setup.setup_id
 
+            if self._kit:
+                self._kit.on_order_event(
+                    order_id=receipt.oms_order_id,
+                    pair=setup.symbol,
+                    side="LONG" if setup.direction == Direction.LONG else "SHORT",
+                    order_type="STOP_LIMIT",
+                    status="SUBMITTED",
+                    requested_qty=float(setup.qty_planned),
+                    requested_price=setup.bos_level,
+                    strategy_id=STRATEGY_ID,
+                )
+
         # Conditional catch-up LIMIT (spec s11.4): only if price already broke BoS
         tf1h = self.tf_states.get(setup.symbol, {}).get("1H")
         price_now = tf1h.close if tf1h else 0.0
@@ -2165,6 +2177,20 @@ class HelixEngine:
                 concurrent_positions_strategy=len(self.active_setups),
             )
 
+            self._kit.on_order_event(
+                order_id=oms_order_id,
+                pair=setup.symbol,
+                side="LONG" if setup.direction == Direction.LONG else "SHORT",
+                order_type="STOP_LIMIT",
+                status="FILLED",
+                requested_qty=float(setup.qty_planned),
+                filled_qty=float(fill_qty),
+                requested_price=setup.bos_level,
+                fill_price=fill_price,
+                related_trade_id=setup.trade_id or setup.setup_id,
+                strategy_id=STRATEGY_ID,
+            )
+
     async def _on_stop_fill(self, oms_order_id: str, payload: dict) -> None:
         """Handle a stop-loss fill — record exit, update circuit breaker."""
         for setup_id, setup in list(self.active_setups.items()):
@@ -2260,6 +2286,20 @@ class HelixEngine:
                         pnl_pct=_pnl_pct,
                     )
 
+                    self._kit.on_order_event(
+                        order_id=oms_order_id,
+                        pair=setup.symbol,
+                        side="SELL" if setup.direction == Direction.LONG else "BUY",
+                        order_type="STOP",
+                        status="FILLED",
+                        requested_qty=float(setup.qty_open),
+                        filled_qty=float(setup.qty_open),
+                        requested_price=setup.current_stop,
+                        fill_price=fill_price,
+                        related_trade_id=setup.trade_id or setup.setup_id,
+                        strategy_id=STRATEGY_ID,
+                    )
+
                 # Clean up
                 setup.state = SetupState.CLOSED
                 self.active_setups.pop(setup_id, None)
@@ -2274,6 +2314,24 @@ class HelixEngine:
         setup_id = self._order_to_setup.pop(oms_order_id, None)
         if setup_id:
             logger.info("Order %s terminal (%s) for setup %s", oms_order_id, etype, setup_id[:8])
+
+            setup = self.pending_setups.get(setup_id) or self.active_setups.get(setup_id)
+            if self._kit and setup:
+                status_map = {
+                    OMSEventType.ORDER_REJECTED: "REJECTED",
+                    OMSEventType.ORDER_CANCELLED: "CANCELLED",
+                    OMSEventType.ORDER_EXPIRED: "EXPIRED",
+                }
+                self._kit.on_order_event(
+                    order_id=oms_order_id,
+                    pair=setup.symbol,
+                    side="LONG" if setup.direction == Direction.LONG else "SHORT",
+                    order_type="STOP_LIMIT",
+                    status=status_map.get(etype, "CANCELLED"),
+                    requested_qty=float(setup.qty_planned),
+                    requested_price=setup.bos_level,
+                    strategy_id=STRATEGY_ID,
+                )
 
     # ------------------------------------------------------------------
     # Live market data helpers

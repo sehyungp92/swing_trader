@@ -510,17 +510,47 @@ class BreakoutEngine:
 
         if direction and gates.hard_block(direction, regime_4h, daily_slope, atr14_d):
             logger.info("%s: hard block %s", symbol, direction)
+            if self._kit:
+                self._kit.log_missed(
+                    pair=symbol,
+                    side="LONG" if direction == Direction.LONG else "SHORT",
+                    signal="breakout",
+                    signal_id=f"{symbol}_hard_block_{bar_dates[-1]}",
+                    signal_strength=0.0,
+                    blocked_by="hard_block",
+                    block_reason=f"4H regime {regime_4h.value} blocks {direction.name}",
+                )
             direction = None
 
         # --- Chop HALT blocks new breakout qualification ---
         if chop_mode == ChopMode.HALT and direction is not None:
             logger.info("%s: CHOP HALT blocks %s breakout", symbol, direction.name)
+            if self._kit:
+                self._kit.log_missed(
+                    pair=symbol,
+                    side="LONG" if direction == Direction.LONG else "SHORT",
+                    signal="breakout",
+                    signal_id=f"{symbol}_chop_halt_{bar_dates[-1]}",
+                    signal_strength=0.0,
+                    blocked_by="chop_halt",
+                    block_reason=f"Chop score too high, HALT mode active",
+                )
             direction = None
 
         # Directional filter: block directions that are negative-EV for this symbol
         if direction is not None:
             dir_str = "LONG" if direction == Direction.LONG else "SHORT"
             if dir_str not in cfg.allowed_directions:
+                if self._kit:
+                    self._kit.log_missed(
+                        pair=symbol,
+                        side=dir_str,
+                        signal="breakout",
+                        signal_id=f"{symbol}_direction_filter_{bar_dates[-1]}",
+                        signal_strength=0.0,
+                        blocked_by="direction_filter",
+                        block_reason=f"{dir_str} not in allowed_directions {cfg.allowed_directions}",
+                    )
                 direction = None
 
         # --- Inside close invalidation (spec §10) ---
@@ -613,6 +643,16 @@ class BreakoutEngine:
         )
         hist.add_disp(disp)
         if not disp_pass:
+            if self._kit and direction is not None:
+                self._kit.log_missed(
+                    pair=symbol,
+                    side="LONG" if direction == Direction.LONG else "SHORT",
+                    signal="breakout",
+                    signal_id=f"{symbol}_displacement_{bar_dates[-1]}",
+                    signal_strength=round(disp / disp_th, 2) if disp_th > 0 else 0.0,
+                    blocked_by="displacement",
+                    block_reason=f"displacement {disp:.3f} < threshold {disp_th:.3f}",
+                )
             return
 
         # --- 7) Breakout quality reject ---
@@ -621,6 +661,16 @@ class BreakoutEngine:
             float(highs[-1]), float(lows[-1]), open_today, close_today, atr14_d, direction
         ):
             logger.info("%s: Breakout quality rejected", symbol)
+            if self._kit and direction is not None:
+                self._kit.log_missed(
+                    pair=symbol,
+                    side="LONG" if direction == Direction.LONG else "SHORT",
+                    signal="breakout",
+                    signal_id=f"{symbol}_breakout_quality_{bar_dates[-1]}",
+                    signal_strength=0.0,
+                    blocked_by="breakout_quality",
+                    block_reason="Breakout bar quality check failed",
+                )
             return
 
         # --- 8) Evidence score (detailed) ---
@@ -642,6 +692,16 @@ class BreakoutEngine:
         if score_total < score_threshold:
             logger.info("%s: Score %d below threshold %d",
                         symbol, score_total, score_threshold)
+            if self._kit and direction is not None:
+                self._kit.log_missed(
+                    pair=symbol,
+                    side="LONG" if direction == Direction.LONG else "SHORT",
+                    signal="breakout",
+                    signal_id=f"{symbol}_score_threshold_{bar_dates[-1]}",
+                    signal_strength=round(score_total / score_threshold, 2) if score_threshold > 0 else 0.0,
+                    blocked_by="score_threshold",
+                    block_reason=f"score {score_total} < threshold {score_threshold}",
+                )
             if campaign.state in (CampaignState.BREAKOUT, CampaignState.POSITION_OPEN,
                                   CampaignState.CONTINUATION):
                 campaign.bars_since_breakout += 1
@@ -769,6 +829,7 @@ class BreakoutEngine:
         if self._kit:
             for sym in self._config:
                 self._kit.capture_snapshot(sym)
+                self._kit.classify_regime(sym)
 
     async def _on_hourly_close(self, symbol: str, now_et: datetime) -> None:
         """Per-symbol hourly logic: entries, adds, pending re-check."""
@@ -960,6 +1021,16 @@ class BreakoutEngine:
         final_risk_pct = final_risk_dollars / self._equity if self._equity > 0 else 0.0
         if not allocator.micro_guard_ok(expiry_mult, disp_mult, trade_regime, final_risk_pct, base_risk_adj):
             logger.info("%s: Micro guard blocked", symbol)
+            if self._kit and direction is not None:
+                self._kit.log_missed(
+                    pair=symbol,
+                    side="LONG" if direction == Direction.LONG else "SHORT",
+                    signal="breakout",
+                    signal_id=f"{symbol}_micro_guard_{datetime.now(timezone.utc).date()}",
+                    signal_strength=0.0,
+                    blocked_by="micro_guard",
+                    block_reason="Micro guard risk check failed",
+                )
             return
 
         # Friction gate
@@ -1129,6 +1200,18 @@ class BreakoutEngine:
         if receipt.oms_order_id:
             setup.primary_order_id = receipt.oms_order_id
             self._order_to_setup[receipt.oms_order_id] = setup.setup_id
+
+            if self._kit:
+                self._kit.on_order_event(
+                    order_id=receipt.oms_order_id,
+                    pair=symbol,
+                    side="LONG" if direction == Direction.LONG else "SHORT",
+                    order_type=order_type.value if hasattr(order_type, 'value') else str(order_type),
+                    status="SUBMITTED",
+                    requested_qty=float(shares),
+                    requested_price=entry_price,
+                    strategy_id=STRATEGY_ID,
+                )
 
         self.active_setups[setup.setup_id] = setup
         logger.info("%s: Entry %s %s placed — shares=%d, stop=%.2f, tp1=%.2f",
@@ -1612,6 +1695,20 @@ class BreakoutEngine:
                 pnl_pct=_pnl_pct,
             )
 
+            self._kit.on_order_event(
+                order_id=setup.stop_order_id or setup.primary_order_id or "",
+                pair=setup.symbol,
+                side="SELL" if setup.direction == Direction.LONG else "BUY",
+                order_type="STOP",
+                status="FILLED",
+                requested_qty=float(setup.fill_qty),
+                filled_qty=float(setup.fill_qty),
+                requested_price=setup.current_stop,
+                fill_price=exit_price,
+                related_trade_id=setup.setup_id,
+                strategy_id=STRATEGY_ID,
+            )
+
         logger.info("%s: Position closed — reason=%s, R=%.2f", setup.symbol, reason, setup.r_state)
 
     # ------------------------------------------------------------------
@@ -1858,6 +1955,20 @@ class BreakoutEngine:
                             concurrent_positions_strategy=len(self.active_setups),
                         )
 
+                        self._kit.on_order_event(
+                            order_id=oms_order_id,
+                            pair=setup.symbol,
+                            side="LONG" if setup.direction == Direction.LONG else "SHORT",
+                            order_type=setup.entry_type.value if hasattr(setup.entry_type, "value") else str(setup.entry_type),
+                            status="FILLED",
+                            requested_qty=float(setup.shares_planned),
+                            filled_qty=float(setup.fill_qty),
+                            requested_price=setup.entry_price,
+                            fill_price=setup.fill_price,
+                            related_trade_id=setup.setup_id,
+                            strategy_id=STRATEGY_ID,
+                        )
+
                     # Submit bracket orders (stop + TP) for position protection
                     await self._submit_bracket_orders(setup)
 
@@ -1865,6 +1976,18 @@ class BreakoutEngine:
                     if setup.state in (SetupState.ARMED, SetupState.TRIGGERED):
                         setup.state = SetupState.CANCELLED
                         logger.info("%s: Order cancelled", setup.symbol)
+
+                        if self._kit:
+                            self._kit.on_order_event(
+                                order_id=oms_order_id,
+                                pair=setup.symbol,
+                                side="LONG" if setup.direction == Direction.LONG else "SHORT",
+                                order_type=setup.entry_type.value if hasattr(setup.entry_type, "value") else str(setup.entry_type),
+                                status="CANCELLED",
+                                requested_qty=float(setup.shares_planned),
+                                requested_price=setup.entry_price,
+                                strategy_id=STRATEGY_ID,
+                            )
 
             except Exception:
                 logger.exception("Error processing OMS event")

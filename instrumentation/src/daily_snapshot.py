@@ -84,6 +84,7 @@ class DailySnapshot:
 
     # Experiment A/B tracking
     experiment_breakdown: Optional[dict] = field(default=None)
+    active_experiments: Dict[str, dict] = field(default_factory=dict)
 
     # Health
     error_count: int = 0
@@ -221,6 +222,7 @@ class DailySnapshotBuilder:
 
             # Experiment A/B breakdown
             exp_groups: Dict[str, dict] = {}
+            exp_strategy_ids: Dict[str, List[str]] = {}
             for t in completed:
                 eid = t.get("experiment_id") or ""
                 evar = t.get("experiment_variant") or ""
@@ -229,13 +231,20 @@ class DailySnapshotBuilder:
                 key = f"{eid}:{evar}" if evar else eid
                 if key not in exp_groups:
                     exp_groups[key] = {"trades": 0, "pnl": 0.0, "wins": 0}
+                    exp_strategy_ids[key] = []
                 exp_groups[key]["trades"] += 1
                 exp_groups[key]["pnl"] += t.get("pnl", 0) or 0
                 if (t.get("pnl") or 0) > 0:
                     exp_groups[key]["wins"] += 1
-            for data in exp_groups.values():
+                sid = t.get("strategy_id", "")
+                if sid:
+                    exp_strategy_ids[key].append(sid)
+            for key, data in exp_groups.items():
                 data["pnl"] = round(data["pnl"], 4)
                 data["win_rate"] = round(data["wins"] / data["trades"], 4) if data["trades"] > 0 else 0
+                sids = exp_strategy_ids.get(key, [])
+                data["strategy_id"] = max(set(sids), key=sids.count) if sids else ""
+                data["strategy_ids"] = sorted(set(sids))
             snapshot.experiment_breakdown = exp_groups or None
 
         # --- PER-STRATEGY SUMMARY ---
@@ -312,6 +321,9 @@ class DailySnapshotBuilder:
         # --- ERRORS ---
         snapshot.error_count = len(errors)
 
+        # --- ACTIVE EXPERIMENTS ---
+        snapshot.active_experiments = self._load_active_experiments()
+
         return snapshot
 
     def save(self, snapshot: DailySnapshot) -> None:
@@ -333,6 +345,28 @@ class DailySnapshotBuilder:
                 except json.JSONDecodeError:
                     pass
         return events
+
+    def _load_active_experiments(self) -> dict:
+        """Load active experiment metadata from config."""
+        config_path = Path(self.data_dir).parent / "config" / "experiments.yaml"
+        if not config_path.exists():
+            return {}
+        try:
+            import yaml
+            with open(config_path) as f:
+                experiments = yaml.safe_load(f) or {}
+            return {
+                exp_id: {
+                    "hypothesis": exp.get("hypothesis", ""),
+                    "variants": exp.get("variants", []),
+                    "primary_metric": exp.get("primary_metric", "sharpe"),
+                    "start_date": exp.get("start_date", ""),
+                }
+                for exp_id, exp in experiments.items()
+                if not exp.get("concluded", False)
+            }
+        except Exception:
+            return {}
 
     def _load_trades(self, date_str: str) -> list:
         return self._load_jsonl("trades", "trades", date_str)

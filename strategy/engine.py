@@ -1044,6 +1044,18 @@ class ATRSSEngine:
                 receipt.oms_order_id,
             )
 
+            if self._kit:
+                self._kit.on_order_event(
+                    order_id=receipt.oms_order_id,
+                    pair=candidate.symbol,
+                    side="LONG" if candidate.direction == Direction.LONG else "SHORT",
+                    order_type="STOP_LIMIT",
+                    status="SUBMITTED",
+                    requested_qty=float(candidate.qty),
+                    requested_price=candidate.trigger_price,
+                    strategy_id=STRATEGY_ID,
+                )
+
     async def _submit_addon_a(
         self,
         sym: str,
@@ -1552,6 +1564,20 @@ class ATRSSEngine:
                     concurrent_positions_strategy=len(self.positions),
                 )
 
+                self._kit.on_order_event(
+                    order_id=oms_order_id,
+                    pair=sym,
+                    side="LONG" if direction == Direction.LONG else "SHORT",
+                    order_type="STOP_LIMIT",
+                    status="FILLED",
+                    requested_qty=float(meta["qty"]),
+                    filled_qty=float(fill_qty),
+                    requested_price=meta["trigger_price"],
+                    fill_price=fill_price,
+                    related_trade_id=trade_id,
+                    strategy_id=STRATEGY_ID,
+                )
+
         elif leg_type == LegType.ADDON_A:
             pos = self.positions.get(sym)
             if pos:
@@ -1681,6 +1707,20 @@ class ATRSSEngine:
                             mae_pct=_mae_pct,
                             pnl_pct=_pnl_pct,
                         )
+
+                    self._kit.on_order_event(
+                        order_id=oms_order_id,
+                        pair=sym,
+                        side="SELL" if pos.direction == Direction.LONG else "BUY",
+                        order_type="STOP",
+                        status="FILLED",
+                        requested_qty=float(pos.total_qty),
+                        filled_qty=float(pos.total_qty),
+                        requested_price=pos.current_stop,
+                        fill_price=fill_price,
+                        related_trade_id=pos.base_leg.trade_id if pos.base_leg else "",
+                        strategy_id=STRATEGY_ID,
+                    )
 
                 # M8: Remove position entirely instead of resetting to empty book
                 self.positions.pop(sym, None)
@@ -1838,6 +1878,23 @@ class ATRSSEngine:
                     "Order %s for %s %s: %s",
                     oms_order_id, sym, meta.get("type"), etype,
                 )
+
+                if self._kit:
+                    status_map = {
+                        OMSEventType.ORDER_REJECTED: "REJECTED",
+                        OMSEventType.ORDER_CANCELLED: "CANCELLED",
+                        OMSEventType.ORDER_EXPIRED: "EXPIRED",
+                    }
+                    self._kit.on_order_event(
+                        order_id=oms_order_id,
+                        pair=meta.get("symbol", ""),
+                        side="LONG" if meta.get("direction") == Direction.LONG else "SHORT",
+                        order_type="STOP_LIMIT",
+                        status=status_map.get(etype, "CANCELLED"),
+                        requested_qty=float(meta.get("qty", 0)),
+                        requested_price=meta.get("trigger_price", 0),
+                        strategy_id=STRATEGY_ID,
+                    )
                 # C2: If addon_a was rejected/cancelled, clear pending ID so it can be retried
                 if meta.get("type") == CandidateType.ADDON_A and sym:
                     pos = self.positions.get(sym)

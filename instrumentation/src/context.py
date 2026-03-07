@@ -26,6 +26,7 @@ class InstrumentationContext:
     drawdown_tracker: object = None   # DrawdownTracker
     overnight_gap_tracker: object = None  # OvernightGapTracker
     coordination_logger: object = None   # CoordinationLogger
+    order_logger: object = None           # OrderLogger
     overlay_state_provider: object = None  # Callable[[], dict[str, bool]]
     data_dir: str = "instrumentation/data"
 

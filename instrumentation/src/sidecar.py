@@ -29,6 +29,7 @@ _PRIORITY_MAP = {
     "trade": 3,
     "missed_opportunity": 3,
     "daily_snapshot": 3,
+    "order": 3,
     "process_quality": 4,
     "post_exit": 4,
     "coordinator_action": 4,
@@ -43,6 +44,7 @@ _DIR_TO_EVENT_TYPE = {
     "daily": "daily_snapshot",
     "post_exit": "post_exit",
     "coordination": "coordinator_action",
+    "orders": "order",
 }
 
 
@@ -167,6 +169,8 @@ class Sidecar:
         # Compute priority: trade exits elevated to 2, errors to 1
         priority = _PRIORITY_MAP.get(event_type, 3)
         if event_type == "trade" and raw_event.get("stage") == "exit":
+            priority = 2
+        elif event_type == "order" and raw_event.get("coordinator_triggered", False):
             priority = 2
 
         return {
