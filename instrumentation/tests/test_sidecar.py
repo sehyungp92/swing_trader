@@ -1,4 +1,6 @@
 """Tests for Sidecar forwarder."""
+from __future__ import annotations
+
 import json
 import tempfile
 from pathlib import Path
@@ -120,7 +122,7 @@ class TestSidecar:
 
     def test_wrap_event_priority_heartbeat(self):
         raw = {"event_metadata": {"event_id": "hb1"}}
-        wrapped = self.sidecar._wrap_event(raw, "sidecar_heartbeat")
+        wrapped = self.sidecar._wrap_event(raw, "heartbeat")
         assert wrapped["priority"] == 4
 
     def test_compute_buffer_depth_empty(self):
@@ -180,3 +182,50 @@ class TestSidecar:
         sig = sidecar._sign_payload(canonical)
         assert sig  # should produce valid signature
         del os.environ["TEST_HMAC_SECRET"]
+
+    def test_forward_event_types_filtering(self):
+        """Only configured event types should be forwarded."""
+        config = {**self.config}
+        config["sidecar"] = {**config["sidecar"], "forward_event_types": ["trade", "error"]}
+        sidecar = Sidecar(config)
+
+        # Create trade and daily snapshot files
+        (Path(self.tmpdir) / "trades").mkdir(parents=True, exist_ok=True)
+        (Path(self.tmpdir) / "trades" / "trades_2026-03-01.jsonl").write_text(
+            json.dumps({"trade_id": "t1", "event_metadata": {"event_id": "id1"}}) + "\n"
+        )
+        (Path(self.tmpdir) / "daily").mkdir(parents=True, exist_ok=True)
+        (Path(self.tmpdir) / "daily" / "daily_2026-03-01.json").write_text(
+            json.dumps({"snapshot_id": "s1"})
+        )
+
+        # run_once should only process trades (not daily_snapshot)
+        sidecar.run_once()
+        # daily_snapshot not in forward list, so its watermark should NOT be updated
+        daily_key = str(Path(self.tmpdir) / "daily" / "daily_2026-03-01.json")
+        assert daily_key not in sidecar.watermarks
+
+    def test_forward_event_types_none_allows_all(self):
+        """When forward_event_types is not set, all types should pass."""
+        sidecar = Sidecar(self.config)
+        assert sidecar.forward_event_types is None
+
+    def test_interruptible_sleep_stops_on_running_false(self):
+        """_interruptible_sleep should exit early when _running is False."""
+        import time
+        self.sidecar._running = False
+        start = time.monotonic()
+        self.sidecar._interruptible_sleep(10)
+        elapsed = time.monotonic() - start
+        assert elapsed < 2  # should exit almost immediately
+
+    def test_streaming_read_matches_full_read(self):
+        """Streaming file read should produce same events as the old approach."""
+        filepath = self._write_trade_events([
+            {"trade_id": f"t{i}", "event_metadata": {"event_id": f"id{i}", "exchange_timestamp": "2026-03-01T10:00:00Z"}}
+            for i in range(100)
+        ])
+        events = self.sidecar._read_unsent_events(filepath, "trade")
+        assert len(events) == 100
+        assert events[0]["_line_number"] == 0
+        assert events[99]["_line_number"] == 99

@@ -1,4 +1,6 @@
 """Tests for the relay service."""
+from __future__ import annotations
+
 import hashlib
 import hmac
 import json
@@ -460,3 +462,210 @@ class TestRelayAPI:
         resp = self._sign_and_post(payload)
         assert resp.status_code == 200
         assert resp.json()["accepted"] == 0
+
+    def test_bot_id_mismatch_rejected(self):
+        """Events with bot_id differing from envelope should be rejected."""
+        payload = {
+            "bot_id": "test_bot",
+            "events": [{
+                "event_id": "evt-mismatch-1",
+                "bot_id": "other_bot",
+                "event_type": "trade",
+                "payload": "{}",
+            }],
+        }
+        resp = self._sign_and_post(payload)
+        assert resp.status_code == 400
+        assert "doesn't match" in resp.text
+
+
+class TestRelayAPIKeyAuth:
+    """Tests for API key authentication on read/admin endpoints."""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = str(Path(self.tmpdir) / "test.db")
+        self.secret = "test-secret-key"
+        self.api_key = "test-read-api-key"
+        app = create_relay_app(
+            db_path=self.db_path,
+            shared_secrets={"test_bot": self.secret},
+            api_key=self.api_key,
+        )
+        self.client = TestClient(app)
+
+    def _sign_and_post(self, payload: dict):
+        body = json.dumps(payload, sort_keys=True)
+        sig = hmac.new(self.secret.encode(), body.encode(), hashlib.sha256).hexdigest()
+        return self.client.post(
+            "/events",
+            content=body,
+            headers={"Content-Type": "application/json", "X-Signature": sig},
+        )
+
+    def _seed_event(self):
+        payload = {
+            "bot_id": "test_bot",
+            "events": [{"event_id": "evt-auth-1", "bot_id": "test_bot",
+                         "event_type": "trade", "payload": "{}"}],
+        }
+        self._sign_and_post(payload)
+
+    def test_get_events_without_key_returns_401(self):
+        resp = self.client.get("/events")
+        assert resp.status_code == 401
+
+    def test_get_events_with_wrong_key_returns_401(self):
+        resp = self.client.get("/events", headers={"X-Api-Key": "wrong-key"})
+        assert resp.status_code == 401
+
+    def test_get_events_with_valid_key(self):
+        self._seed_event()
+        resp = self.client.get("/events", headers={"X-Api-Key": self.api_key})
+        assert resp.status_code == 200
+        assert len(resp.json()["events"]) == 1
+
+    def test_ack_without_key_returns_401(self):
+        resp = self.client.post("/ack", json={"watermark": "evt-auth-1"})
+        assert resp.status_code == 401
+
+    def test_ack_with_valid_key(self):
+        self._seed_event()
+        resp = self.client.post(
+            "/ack",
+            json={"watermark": "evt-auth-1"},
+            headers={"X-Api-Key": self.api_key},
+        )
+        assert resp.status_code == 200
+
+    def test_admin_purge_without_key_returns_401(self):
+        resp = self.client.post("/admin/purge?days=7")
+        assert resp.status_code == 401
+
+    def test_admin_purge_with_valid_key(self):
+        resp = self.client.post(
+            "/admin/purge?days=7",
+            headers={"X-Api-Key": self.api_key},
+        )
+        assert resp.status_code == 200
+
+    def test_health_no_key_required(self):
+        """Health endpoint should remain open regardless of api_key config."""
+        resp = self.client.get("/health")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+
+    def test_ingest_not_affected_by_api_key(self):
+        """POST /events uses HMAC auth, not API key."""
+        payload = {
+            "bot_id": "test_bot",
+            "events": [{"event_id": "evt-api-1", "bot_id": "test_bot",
+                         "event_type": "trade", "payload": "{}"}],
+        }
+        resp = self._sign_and_post(payload)
+        assert resp.status_code == 200
+
+
+class TestStringPriorityCoercion:
+    """k_stock_trader sends string priorities ('high','normal','low').
+    The relay must coerce them to integers."""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = str(Path(self.tmpdir) / "test.db")
+        app = create_relay_app(db_path=self.db_path)
+        self.client = TestClient(app)
+
+    def _post(self, payload: dict):
+        body = json.dumps(payload, sort_keys=True)
+        return self.client.post(
+            "/events",
+            content=body,
+            headers={"Content-Type": "application/json"},
+        )
+
+    def test_string_priority_high(self):
+        payload = {
+            "bot_id": "k_bot",
+            "events": [{"event_id": "sp-1", "bot_id": "k_bot",
+                         "event_type": "bot_error", "payload": "{}",
+                         "priority": "high"}],
+        }
+        resp = self._post(payload)
+        assert resp.status_code == 200
+        events = self.client.get("/events").json()["events"]
+        assert events[0]["priority"] == 1
+
+    def test_string_priority_normal(self):
+        payload = {
+            "bot_id": "k_bot",
+            "events": [{"event_id": "sp-2", "bot_id": "k_bot",
+                         "event_type": "trade", "payload": "{}",
+                         "priority": "normal"}],
+        }
+        resp = self._post(payload)
+        assert resp.status_code == 200
+        events = self.client.get("/events").json()["events"]
+        assert events[0]["priority"] == 3
+
+    def test_string_priority_low(self):
+        payload = {
+            "bot_id": "k_bot",
+            "events": [{"event_id": "sp-3", "bot_id": "k_bot",
+                         "event_type": "heartbeat", "payload": "{}",
+                         "priority": "low"}],
+        }
+        resp = self._post(payload)
+        assert resp.status_code == 200
+        events = self.client.get("/events").json()["events"]
+        assert events[0]["priority"] == 4
+
+    def test_string_priority_critical(self):
+        payload = {
+            "bot_id": "k_bot",
+            "events": [{"event_id": "sp-4", "bot_id": "k_bot",
+                         "event_type": "error", "payload": "{}",
+                         "priority": "critical"}],
+        }
+        resp = self._post(payload)
+        assert resp.status_code == 200
+        events = self.client.get("/events").json()["events"]
+        assert events[0]["priority"] == 0
+
+    def test_int_priority_still_works(self):
+        payload = {
+            "bot_id": "k_bot",
+            "events": [{"event_id": "sp-5", "bot_id": "k_bot",
+                         "event_type": "trade", "payload": "{}",
+                         "priority": 2}],
+        }
+        resp = self._post(payload)
+        assert resp.status_code == 200
+        events = self.client.get("/events").json()["events"]
+        assert events[0]["priority"] == 2
+
+    def test_unknown_string_priority_defaults_to_3(self):
+        payload = {
+            "bot_id": "k_bot",
+            "events": [{"event_id": "sp-6", "bot_id": "k_bot",
+                         "event_type": "trade", "payload": "{}",
+                         "priority": "medium"}],
+        }
+        resp = self._post(payload)
+        assert resp.status_code == 200
+        events = self.client.get("/events").json()["events"]
+        assert events[0]["priority"] == 3
+
+    def test_mixed_priority_ordering(self):
+        """Events from different bots with mixed priority types sort correctly."""
+        for eid, prio in [("m1", "low"), ("m2", 1), ("m3", "high"), ("m4", "normal")]:
+            payload = {
+                "bot_id": "k_bot",
+                "events": [{"event_id": eid, "bot_id": "k_bot",
+                             "event_type": "trade", "payload": "{}",
+                             "priority": prio}],
+            }
+            self._post(payload)
+        events = self.client.get("/events").json()["events"]
+        priorities = [e["priority"] for e in events]
+        assert priorities == sorted(priorities)

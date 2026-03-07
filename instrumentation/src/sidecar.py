@@ -33,7 +33,7 @@ _PRIORITY_MAP = {
     "process_quality": 4,
     "post_exit": 4,
     "coordinator_action": 4,
-    "sidecar_heartbeat": 4,
+    "heartbeat": 4,
 }
 
 _DIR_TO_EVENT_TYPE = {
@@ -75,6 +75,13 @@ class Sidecar:
         self.hmac_secret = os.environ.get(hmac_env, "").encode()
         if not self.hmac_secret:
             logger.warning("HMAC secret not set in %s — events will be unsigned", hmac_env)
+
+        # Event type filtering — only forward types the brain handles.
+        # Default: all types the brain currently routes to real handlers.
+        self.forward_event_types: set[str] | None = None
+        fwd = sc.get("forward_event_types")
+        if fwd is not None:
+            self.forward_event_types = set(fwd)
 
         self.watermark_file = self.buffer_dir / "watermark.json"
         self.watermarks = self._load_watermarks()
@@ -128,9 +135,13 @@ class Sidecar:
         events: List[dict] = []
         try:
             if filepath.suffix == ".jsonl":
-                lines = filepath.read_text().strip().split("\n")
-                for i, line in enumerate(lines):
-                    if i >= last_sent and line.strip():
+                with open(filepath, "r") as fh:
+                    for i, line in enumerate(fh):
+                        if i < last_sent:
+                            continue
+                        line = line.strip()
+                        if not line:
+                            continue
                         try:
                             raw = json.loads(line)
                             wrapped = self._wrap_event(raw, event_type)
@@ -251,19 +262,29 @@ class Sidecar:
             except Exception as e:
                 logger.warning("Send failed (attempt %d/%d): %s", attempt + 1, self.retry_max, e)
 
-            backoff = self.retry_backoff_base * (2 ** attempt)
-            time.sleep(min(backoff, 300))
+            backoff = min(self.retry_backoff_base * (2 ** attempt), 300)
+            self._interruptible_sleep(backoff)
 
         self._relay_reachable = False
         return False
 
     # --- Main loop ---
 
+    def _interruptible_sleep(self, seconds: float) -> None:
+        """Sleep in 1-second chunks so stop() isn't blocked."""
+        remaining = seconds
+        while remaining > 0 and self._running:
+            chunk = min(remaining, 1.0)
+            time.sleep(chunk)
+            remaining -= chunk
+
     def run_once(self) -> None:
         all_files = self._get_event_files()
         total_sent = 0
 
         for filepath, event_type in all_files:
+            if self.forward_event_types is not None and event_type not in self.forward_event_types:
+                continue
             unsent = self._read_unsent_events(filepath, event_type)
             if not unsent:
                 continue
@@ -279,6 +300,13 @@ class Sidecar:
                 else:
                     logger.warning("Failed to send batch from %s, will retry", filepath)
                     break
+
+        # Periodically clean up watermarks for rotated/deleted files
+        if self._poll_count > 0 and self._poll_count % self.heartbeat_every_n == 0:
+            try:
+                self.cleanup_old_watermarks()
+            except Exception as e:
+                logger.debug("Watermark cleanup failed: %s", e)
 
         if total_sent > 0:
             logger.info("Forwarded %d events to relay", total_sent)
@@ -318,7 +346,8 @@ class Sidecar:
             last_sent = self.watermarks.get(key, 0)
             try:
                 if filepath.suffix == ".jsonl":
-                    line_count = sum(1 for line in filepath.read_text().strip().split("\n") if line.strip())
+                    with open(filepath, "r") as fh:
+                        line_count = sum(1 for line in fh if line.strip())
                     total += max(0, line_count - last_sent)
                 elif filepath.suffix == ".json" and last_sent == 0:
                     total += 1
@@ -336,8 +365,9 @@ class Sidecar:
                 f"{self.bot_id}|heartbeat|{datetime.now(timezone.utc).isoformat()}".encode()
             ).hexdigest()[:16],
             "bot_id": self.bot_id,
-            "event_type": "sidecar_heartbeat",
+            "event_type": "heartbeat",
             "payload": json.dumps({
+                "source": "sidecar",
                 "relay_reachable": self._relay_reachable,
                 "last_successful_forward_at": self._last_successful_forward_at,
                 "buffer_depth": self._compute_buffer_depth(),
@@ -345,7 +375,7 @@ class Sidecar:
                 "poll_count": self._poll_count,
             }),
             "exchange_timestamp": datetime.now(timezone.utc).isoformat(),
-            "priority": _PRIORITY_MAP.get("sidecar_heartbeat", 4),
+            "priority": _PRIORITY_MAP.get("heartbeat", 4),
         }
 
         self._send_batch([heartbeat])

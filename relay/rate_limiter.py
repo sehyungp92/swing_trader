@@ -1,4 +1,6 @@
 """Per-bot rate limiter for the relay service."""
+from __future__ import annotations
+
 import time
 from collections import defaultdict
 

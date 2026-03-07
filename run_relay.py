@@ -13,4 +13,5 @@ if Path(secrets_file).exists():
 app = create_relay_app(
     db_path=os.environ.get("RELAY_DB_PATH", "/opt/trading-relay/data/relay.db"),
     shared_secrets=secrets,
+    api_key=os.environ.get("RELAY_API_KEY", ""),
 )

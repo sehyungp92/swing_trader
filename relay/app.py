@@ -1,11 +1,14 @@
 """FastAPI relay application — buffers events from trading bots."""
+from __future__ import annotations
+
 import gzip
+import json
 import logging
 from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Header, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from starlette.middleware.gzip import GZipMiddleware
 
 from relay.auth import HMACAuth
@@ -17,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 # --- Request / Response models ---
 
+_PRIORITY_STRINGS = {"critical": 0, "high": 1, "normal": 3, "low": 4}
+
+
 class EventIn(BaseModel):
     event_id: str
     bot_id: str
@@ -24,6 +30,14 @@ class EventIn(BaseModel):
     payload: str = "{}"
     exchange_timestamp: str = ""
     priority: int = 3
+
+    @field_validator("priority", mode="before")
+    @classmethod
+    def _coerce_priority(cls, v: int | str) -> int:
+        """Accept both integer priorities and string labels (high/normal/low)."""
+        if isinstance(v, str):
+            return _PRIORITY_STRINGS.get(v.lower(), 3)
+        return v
 
 
 class IngestRequest(BaseModel):
@@ -52,11 +66,21 @@ def create_relay_app(
     db_path: str = "data/relay.db",
     shared_secrets: dict[str, str] | None = None,
     max_requests_per_minute: int = 60,
+    api_key: str = "",
 ) -> FastAPI:
-    """Create and configure the relay FastAPI app."""
+    """Create and configure the relay FastAPI app.
+
+    Args:
+        api_key: Shared API key required for GET /events, POST /ack,
+                 and POST /admin/purge. Empty string disables auth
+                 on these endpoints (dev mode).
+    """
 
     import time as _time
     _start_mono = _time.monotonic()
+
+    if not api_key:
+        logger.warning("No api_key configured — read/admin endpoints are unauthenticated")
 
     store = EventStore(db_path=db_path)
     auth = HMACAuth(shared_secrets=shared_secrets)
@@ -75,6 +99,11 @@ def create_relay_app(
 
     app = FastAPI(title="Trading Relay", version="1.0.0", lifespan=lifespan)
     app.add_middleware(GZipMiddleware, minimum_size=500)
+
+    def _check_api_key(key: str) -> Response | None:
+        """Return a 401 Response if api_key is configured and doesn't match."""
+        if api_key and key != api_key:
+            return Response(status_code=401, content="Invalid API key")
 
     @app.post("/events", response_model=IngestResponse)
     async def ingest_events(
@@ -96,7 +125,6 @@ def create_relay_app(
 
         # Parse body to get bot_id for auth lookup
         try:
-            import json
             data = json.loads(body)
             bot_id = data.get("bot_id", "")
         except Exception:
@@ -117,6 +145,14 @@ def create_relay_app(
         # Parse and store events
         try:
             ingest = IngestRequest(**data)
+            # Enforce that per-event bot_id matches envelope bot_id
+            for evt in ingest.events:
+                if evt.bot_id != ingest.bot_id:
+                    return Response(
+                        status_code=400,
+                        content=f"Event {evt.event_id} bot_id '{evt.bot_id}' "
+                                f"doesn't match envelope bot_id '{ingest.bot_id}'",
+                    )
             events = [e.model_dump() for e in ingest.events]
             result = store.insert_events(events)
             logger.info(
@@ -128,19 +164,26 @@ def create_relay_app(
             logger.error("Ingest error: %s", e)
             return Response(status_code=400, content=str(e))
 
-    @app.get("/events")
+    @app.get("/events", response_model=None)
     async def get_events(
         since: str | None = None,
         limit: int = 100,
         bot_id: str | None = None,
-    ) -> dict[str, Any]:
+        x_api_key: str = Header(default=""),
+    ):
         """Pull un-acked events (used by home orchestrator)."""
+        denied = _check_api_key(x_api_key)
+        if denied:
+            return denied
         events = store.get_events(since=since, limit=min(limit, 1000), bot_id=bot_id)
         return {"events": events}
 
-    @app.post("/ack", response_model=AckResponse)
-    async def ack_events(req: AckRequest):
+    @app.post("/ack", response_model=None)
+    async def ack_events(req: AckRequest, x_api_key: str = Header(default="")):
         """Acknowledge events up to a watermark (used by home orchestrator)."""
+        denied = _check_api_key(x_api_key)
+        if denied:
+            return denied
         count = store.ack_up_to(req.watermark)
         return AckResponse(status="ok", watermark=req.watermark, acked_count=count)
 
@@ -160,9 +203,12 @@ def create_relay_app(
             "uptime_seconds": round(uptime, 1),
         }
 
-    @app.post("/admin/purge")
-    async def admin_purge(days: int = 7):
+    @app.post("/admin/purge", response_model=None)
+    async def admin_purge(days: int = 7, x_api_key: str = Header(default="")):
         """Purge acked events older than N days."""
+        denied = _check_api_key(x_api_key)
+        if denied:
+            return denied
         deleted = store.purge_acked(days=days)
         return {"status": "ok", "deleted": deleted, "retention_days": days}
 

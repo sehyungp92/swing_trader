@@ -1,4 +1,6 @@
 """HMAC-SHA256 authentication for the relay service."""
+from __future__ import annotations
+
 import hashlib
 import hmac
 import json

@@ -1,8 +1,10 @@
 """SQLite event store for the relay service."""
+from __future__ import annotations
+
 import logging
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -170,11 +172,7 @@ class EventStore:
         """Delete acked events older than N days, then VACUUM."""
         conn = self._connect()
         try:
-            cutoff = datetime.now(timezone.utc).isoformat()
-            # Compute cutoff: subtract days from current time
-            from datetime import timedelta
-            cutoff_dt = datetime.now(timezone.utc) - timedelta(days=days)
-            cutoff = cutoff_dt.isoformat()
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
             cursor = conn.execute(
                 "DELETE FROM events WHERE acked = 1 AND received_at < ?",
                 (cutoff,),
