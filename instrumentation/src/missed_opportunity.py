@@ -77,7 +77,12 @@ class MissedOpportunityEvent:
     market_regime: str = ""
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        # Add trading_assistant-compatible alias fields.
+        # TA's MissedOpportunityEvent expects these exact names.
+        d["hypothetical_entry"] = d.get("hypothetical_entry_price", 0.0)
+        d["confidence"] = d.get("simulation_confidence", 0.0)
+        return d
 
 
 class MissedOpportunityLogger:

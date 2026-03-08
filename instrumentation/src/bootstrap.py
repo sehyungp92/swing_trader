@@ -118,6 +118,7 @@ def bootstrap_kit(
     symbols: list[str] | None = None,
     data_provider=None,
     initial_equity: float = 100_000,
+    shared_ctx: "InstrumentationContext | None" = None,
 ) -> "InstrumentationKit":
     """Create an InstrumentationKit with all services wired up.
 
@@ -127,20 +128,73 @@ def bootstrap_kit(
         strategy_id: Strategy identifier (used as bot_id and for scoring).
         symbols: Active trading symbols.
         data_provider: Optional data source for snapshots/regime.
+        shared_ctx: Optional shared InstrumentationContext. When provided,
+            the kit reuses the shared context's services (snapshot_service,
+            regime_classifier, sidecar, drawdown_tracker, etc.) instead of
+            creating redundant instances. The kit gets its own TradeLogger
+            and MissedOpportunityLogger (with strategy-specific bot_id) but
+            shares everything else. The sidecar is NOT duplicated — only the
+            shared context should start/stop the sidecar thread.
 
     Returns:
         InstrumentationKit ready for log_entry/log_exit calls.
-        Call kit._ctx.start() to enable sidecar forwarding.
+        When using shared_ctx, do NOT call kit._ctx.start() — the shared
+        context owns the sidecar lifecycle.
     """
     from .kit import InstrumentationKit
 
-    ctx = bootstrap_instrumentation(
-        symbols=symbols,
-        data_provider=data_provider,
-        strategy_id=strategy_id,
-        initial_equity=initial_equity,
-    )
+    if shared_ctx is not None:
+        ctx = _bootstrap_kit_from_shared(strategy_id, shared_ctx)
+    else:
+        ctx = bootstrap_instrumentation(
+            symbols=symbols,
+            data_provider=data_provider,
+            strategy_id=strategy_id,
+            initial_equity=initial_equity,
+        )
     return InstrumentationKit(ctx, strategy_id=strategy_id)
+
+
+def _bootstrap_kit_from_shared(
+    strategy_id: str,
+    shared_ctx: "InstrumentationContext",
+) -> "InstrumentationContext":
+    """Create a lightweight per-strategy context that reuses shared services.
+
+    Gets its own TradeLogger and MissedOpportunityLogger (strategy-specific
+    bot_id) but shares snapshot_service, regime_classifier, sidecar, etc.
+    The sidecar is set to None so starting this context is a no-op.
+    """
+    from .context import InstrumentationContext
+    from .trade_logger import TradeLogger
+    from .missed_opportunity import MissedOpportunityLogger
+
+    config = _load_config()
+    config["bot_id"] = strategy_id
+
+    # Own loggers with strategy-specific bot_id
+    trade_logger = TradeLogger(config, shared_ctx.snapshot_service)
+    missed_logger = MissedOpportunityLogger(config, shared_ctx.snapshot_service)
+
+    return InstrumentationContext(
+        snapshot_service=shared_ctx.snapshot_service,
+        trade_logger=trade_logger,
+        missed_logger=missed_logger,
+        process_scorer=shared_ctx.process_scorer,
+        daily_builder=shared_ctx.daily_builder,
+        regime_classifier=shared_ctx.regime_classifier,
+        sidecar=None,  # shared context owns the single sidecar
+        drawdown_tracker=shared_ctx.drawdown_tracker,
+        overnight_gap_tracker=shared_ctx.overnight_gap_tracker,
+        coordination_logger=shared_ctx.coordination_logger,
+        order_logger=shared_ctx.order_logger,
+        indicator_logger=shared_ctx.indicator_logger,
+        filter_logger=shared_ctx.filter_logger,
+        orderbook_logger=shared_ctx.orderbook_logger,
+        experiment_registry=shared_ctx.experiment_registry,
+        bot_id=strategy_id,
+        data_dir=shared_ctx.data_dir,
+    )
 
 
 def _load_config() -> dict:

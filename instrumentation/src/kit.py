@@ -327,14 +327,30 @@ class InstrumentationKit:
             if trade_event is None:
                 return {}
 
-            # Auto-score the trade
+            # Auto-score the trade and merge score onto the exit record
             if self.ctx.process_scorer is not None:
                 trade_dict = trade_event.to_dict() if hasattr(trade_event, 'to_dict') else trade_event
-                self.ctx.process_scorer.score_and_write(
+                score_result = self.ctx.process_scorer.score_and_write(
                     trade=trade_dict,
                     strategy_type=self.strategy_id,
                     data_dir=self.ctx.data_dir,
                 )
+                # Amend the JSONL exit record so sidecar forwards it with score
+                if score_result is not None:
+                    enrichments = {
+                        "process_quality_score": score_result.process_quality_score,
+                        "root_causes": score_result.root_causes,
+                        "evidence_refs": score_result.evidence_refs,
+                    }
+                    try:
+                        self.ctx.trade_logger.amend_last_event(trade_id, enrichments)
+                    except Exception:
+                        pass
+                    # Also update the in-memory object for the return value
+                    if hasattr(trade_event, "process_quality_score"):
+                        trade_event.process_quality_score = score_result.process_quality_score
+                        trade_event.root_causes = score_result.root_causes
+                        trade_event.evidence_refs = score_result.evidence_refs
 
             # Auto-emit OrderBookContext at exit
             try:

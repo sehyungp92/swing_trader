@@ -118,34 +118,35 @@ async def main() -> None:
         instrumentation_ctx = bootstrap_instrumentation(symbols=all_symbols)
         logger.info("Instrumentation bootstrapped for %s", all_symbols)
 
-        # Per-strategy InstrumentationKits (each gets its own bot_id)
+        # Per-strategy InstrumentationKits — share the parent context's services
+        # (snapshot, sidecar, regime classifier, etc.) but get own TradeLogger/MissedLogger
         atrss_kit = bootstrap_kit(
             strategy_id=ATRSS_ID,
-            symbols=list(ATRSS_CONFIGS.keys()),
+            shared_ctx=instrumentation_ctx,
         )
         logger.info("ATRSS InstrumentationKit bootstrapped")
 
         helix_kit = bootstrap_kit(
             strategy_id=HELIX_ID,
-            symbols=list(HELIX_CONFIGS.keys()),
+            shared_ctx=instrumentation_ctx,
         )
         logger.info("AKC_HELIX InstrumentationKit bootstrapped")
 
         breakout_kit = bootstrap_kit(
             strategy_id=BREAKOUT_ID,
-            symbols=list(BREAKOUT_CONFIGS.keys()),
+            shared_ctx=instrumentation_ctx,
         )
         logger.info("SWING_BREAKOUT_V3 InstrumentationKit bootstrapped")
 
         s5_pb_kit = bootstrap_kit(
             strategy_id=S5_PB_STRATEGY_ID,
-            symbols=list(S5_PB_CONFIGS.keys()),
+            shared_ctx=instrumentation_ctx,
         )
         logger.info("S5_PB InstrumentationKit bootstrapped")
 
         s5_dual_kit = bootstrap_kit(
             strategy_id=S5_DUAL_STRATEGY_ID,
-            symbols=list(S5_DUAL_CONFIGS.keys()),
+            shared_ctx=instrumentation_ctx,
         )
         logger.info("S5_DUAL InstrumentationKit bootstrapped")
     except Exception:
@@ -293,17 +294,7 @@ async def main() -> None:
         except Exception:
             logger.warning("Instrumentation start failed", exc_info=True)
 
-    # Start per-strategy InstrumentationKit contexts
-    for kit_name, kit_obj in [
-        ("ATRSS", atrss_kit), ("AKC_HELIX", helix_kit),
-        ("SWING_BREAKOUT_V3", breakout_kit),
-        ("S5_PB", s5_pb_kit), ("S5_DUAL", s5_dual_kit),
-    ]:
-        if kit_obj is not None:
-            try:
-                kit_obj._ctx.start()
-            except Exception:
-                logger.warning("%s Kit context start failed", kit_name, exc_info=True)
+    # Per-strategy kits share the parent context's sidecar — no separate start needed
 
     # -------------------------------------------------------------------
     # 10. Create strategy engines (shared OMS, coordinator)
@@ -411,6 +402,7 @@ async def main() -> None:
     _backfill_task = None
     _heartbeat_task = None
     _config_check_task = None
+    _post_exit_task = None
 
     if instrumentation_ctx is not None:
         async def _run_daily_snapshot() -> None:
@@ -441,46 +433,91 @@ async def main() -> None:
                     logger.warning("Daily snapshot task error", exc_info=True)
                     await asyncio.sleep(300)
 
+        # Create IBKR historical provider for backfill operations
+        _ibkr_provider = None
+        try:
+            from instrumentation.src.ibkr_provider import IBKRHistoricalProvider
+            _ibkr_provider = IBKRHistoricalProvider(
+                ib=session.ib,
+                contract_factory=contract_factory,
+                loop=asyncio.get_running_loop(),
+            )
+        except Exception:
+            logger.warning("IBKR historical provider init failed — backfills degraded")
+
         async def _run_backfill() -> None:
             """Run missed-opportunity backfill every 5 minutes."""
+            loop = asyncio.get_running_loop()
             while True:
                 try:
                     await asyncio.sleep(300)
                     try:
-                        instrumentation_ctx.missed_logger.run_backfill(data_provider=None)
+                        await loop.run_in_executor(
+                            None,
+                            instrumentation_ctx.missed_logger.run_backfill,
+                            _ibkr_provider,
+                        )
                     except Exception:
                         logger.debug("Backfill cycle error", exc_info=True)
                 except asyncio.CancelledError:
                     break
 
         async def _run_heartbeat() -> None:
-            """Emit portfolio heartbeat every 60 seconds."""
+            """Emit per-strategy heartbeats every 60 seconds.
+
+            Each strategy kit emits its own heartbeat so TA monitoring sees
+            all 5 strategies as alive (not just ATRSS).
+            """
             import time as _time
             start_time = _time.monotonic()
             error_counter = 0
+
+            # Map each kit to its engine(s) for position/order counting
+            _kit_engines = [
+                (atrss_kit, {
+                    "positions": [("positions", atrss_engine)],
+                    "orders": [("pending_orders", atrss_engine)],
+                }),
+                (helix_kit, {
+                    "positions": [("active_setups", helix_engine)],
+                    "orders": [("pending_setups", helix_engine)],
+                }),
+                (breakout_kit, {
+                    "positions": [("active_setups", breakout_engine)],
+                    "orders": [],
+                }),
+                (s5_pb_kit, {
+                    "positions": [("positions", s5_pb_engine)],
+                    "orders": [("_pending_entry", s5_pb_engine)],
+                }),
+                (s5_dual_kit, {
+                    "positions": [("positions", s5_dual_engine)],
+                    "orders": [("_pending_entry", s5_dual_engine)],
+                }),
+            ]
+
             while True:
                 try:
                     await asyncio.sleep(60)
                     uptime = _time.monotonic() - start_time
-                    active_positions = (
-                        len(getattr(atrss_engine, "positions", {}))
-                        + len(getattr(helix_engine, "active_setups", {}))
-                        + len(getattr(breakout_engine, "active_setups", {}))
-                        + len(getattr(s5_pb_engine, "positions", {}))
-                        + len(getattr(s5_dual_engine, "positions", {}))
-                    )
-                    open_orders = (
-                        len(getattr(atrss_engine, "pending_orders", {}))
-                        + len(getattr(helix_engine, "pending_setups", {}))
-                        + len(getattr(s5_pb_engine, "_pending_entry", {}))
-                        + len(getattr(s5_dual_engine, "_pending_entry", {}))
-                    )
-                    atrss_kit.emit_heartbeat(
-                        active_positions=active_positions,
-                        open_orders=open_orders,
-                        uptime_s=uptime,
-                        error_count_1h=error_counter,
-                    )
+
+                    for kit_obj, engine_map in _kit_engines:
+                        if kit_obj is None:
+                            continue
+                        n_pos = sum(
+                            len(getattr(eng, attr, {}))
+                            for attr, eng in engine_map["positions"]
+                        )
+                        n_orders = sum(
+                            len(getattr(eng, attr, {}))
+                            for attr, eng in engine_map["orders"]
+                        )
+                        kit_obj.emit_heartbeat(
+                            active_positions=n_pos,
+                            open_orders=n_orders,
+                            uptime_s=uptime,
+                            error_count_1h=error_counter,
+                        )
                 except asyncio.CancelledError:
                     break
                 except Exception:
@@ -563,10 +600,29 @@ async def main() -> None:
                     logger.debug("Config check task error", exc_info=True)
                     await asyncio.sleep(300)
 
+        async def _run_post_exit_backfill() -> None:
+            """Backfill post-exit prices every 30 minutes."""
+            from instrumentation.src.post_exit_tracker import PostExitTracker
+            if _ibkr_provider is None:
+                logger.warning("No IBKR provider — post-exit backfill disabled")
+                return
+            tracker = PostExitTracker(instrumentation_ctx.data_dir, _ibkr_provider)
+            loop = asyncio.get_running_loop()
+            while True:
+                try:
+                    await asyncio.sleep(1800)
+                    try:
+                        await loop.run_in_executor(None, tracker.run_backfill)
+                    except Exception:
+                        logger.debug("Post-exit backfill error", exc_info=True)
+                except asyncio.CancelledError:
+                    break
+
         _daily_snapshot_task = asyncio.create_task(_run_daily_snapshot())
         _backfill_task = asyncio.create_task(_run_backfill())
         _heartbeat_task = asyncio.create_task(_run_heartbeat())
         _config_check_task = asyncio.create_task(_run_config_check())
+        _post_exit_task = asyncio.create_task(_run_post_exit_backfill())
         logger.info("Instrumentation periodic tasks started")
 
     # -------------------------------------------------------------------
@@ -614,6 +670,8 @@ async def main() -> None:
         _heartbeat_task.cancel()
     if _config_check_task is not None:
         _config_check_task.cancel()
+    if _post_exit_task is not None:
+        _post_exit_task.cancel()
 
     # 0b. Build final daily snapshot before engines stop
     if instrumentation_ctx is not None:
@@ -649,17 +707,7 @@ async def main() -> None:
         except Exception:
             logger.debug("Instrumentation stop failed", exc_info=True)
 
-    # 2c. Stop per-strategy InstrumentationKit contexts
-    for kit_name, kit_obj in [
-        ("ATRSS", atrss_kit), ("AKC_HELIX", helix_kit),
-        ("SWING_BREAKOUT_V3", breakout_kit),
-        ("S5_PB", s5_pb_kit), ("S5_DUAL", s5_dual_kit),
-    ]:
-        if kit_obj is not None:
-            try:
-                kit_obj._ctx.stop()
-            except Exception:
-                logger.debug("%s Kit context stop failed", kit_name, exc_info=True)
+    # Per-strategy kits share the parent sidecar — no separate stop needed
 
     # 3. Close database (after OMS has flushed all state)
     if bootstrap_ctx.has_db:

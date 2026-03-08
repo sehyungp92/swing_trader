@@ -29,8 +29,9 @@ class TradeEvent:
     """
     # Identity + timing
     trade_id: str
-    event_metadata: dict
-    entry_snapshot: dict
+    bot_id: str = ""
+    event_metadata: dict = field(default_factory=dict)
+    entry_snapshot: dict = field(default_factory=dict)
     exit_snapshot: Optional[dict] = None
 
     # Trade data
@@ -78,6 +79,8 @@ class TradeEvent:
     # Post-exit price tracking (backfilled by PostExitTracker)
     post_exit_1h_pct: Optional[float] = None
     post_exit_4h_pct: Optional[float] = None
+    post_exit_1h_price: Optional[float] = None
+    post_exit_4h_price: Optional[float] = None
 
     # Execution quality
     expected_entry_price: Optional[float] = None
@@ -119,11 +122,37 @@ class TradeEvent:
     concurrent_positions_strategy: Optional[int] = None
     correlated_pairs_detail: Optional[list] = None
 
+    # Process quality (merged from scorer for TA compatibility)
+    process_quality_score: Optional[int] = None
+    root_causes: List[str] = field(default_factory=list)
+    evidence_refs: List[str] = field(default_factory=list)
+
     # Event stage
     stage: str = "entry"                    # "entry" or "exit"
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        # Add trading_assistant-compatible alias fields.
+        # TA's TradeEvent Pydantic model expects these exact names; without them
+        # the event silently fails validation and is dropped from analysis.
+        d["market_snapshot"] = d.get("entry_snapshot")
+        d["spread_at_entry"] = d.get("spread_at_entry_bps") or 0.0
+        d["volume_24h"] = d.get("volume_24h_at_entry") or 0.0
+        d["funding_rate"] = d.get("funding_rate_at_entry") or 0.0
+        d["open_interest_delta"] = d.get("open_interest_at_entry") or 0.0
+
+        # TA expects post_exit_1h_price / post_exit_4h_price (absolute prices).
+        # Prefer the price fields; fall back to None (TA handles None gracefully).
+        if d.get("post_exit_1h_price") is None:
+            d["post_exit_1h_price"] = None
+        if d.get("post_exit_4h_price") is None:
+            d["post_exit_4h_price"] = None
+
+        # TA expects process_quality_score as int (default 100 when absent).
+        # Emit 100 when None to prevent Pydantic validation failures.
+        if d.get("process_quality_score") is None:
+            d["process_quality_score"] = 100
+        return d
 
 
 class TradeLogger:
@@ -192,6 +221,7 @@ class TradeLogger:
 
             trade = TradeEvent(
                 trade_id=trade_id,
+                bot_id=self.bot_id,
                 event_metadata=metadata.to_dict(),
                 entry_snapshot=entry_snapshot.to_dict(),
                 pair=pair,
@@ -230,7 +260,7 @@ class TradeLogger:
 
         except Exception as e:
             self._write_error("log_entry", trade_id, e)
-            return TradeEvent(trade_id=trade_id, event_metadata={}, entry_snapshot={})
+            return TradeEvent(trade_id=trade_id, bot_id=self.bot_id)
 
     def log_exit(
         self,
@@ -287,6 +317,9 @@ class TradeLogger:
                 data_source_id=self.data_source_id,
             ).to_dict()
 
+            # Ensure bot_id is on the exit record
+            trade.bot_id = self.bot_id
+
             # Apply enriched fields from kwargs
             for k, v in kwargs.items():
                 if hasattr(trade, k):
@@ -301,6 +334,28 @@ class TradeLogger:
 
     def get_open_trades(self) -> Dict[str, TradeEvent]:
         return dict(self._open_trades)
+
+    def amend_last_event(self, trade_id: str, updates: dict) -> None:
+        """Amend the last written event if it matches trade_id.
+
+        Used to merge process quality score onto the exit record after scoring.
+        """
+        try:
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            filepath = self.data_dir / f"trades_{today}.jsonl"
+            if not filepath.exists():
+                return
+            text = filepath.read_text(encoding="utf-8").rstrip("\n")
+            if not text:
+                return
+            lines = text.split("\n")
+            event = json.loads(lines[-1])
+            if event.get("trade_id") == trade_id:
+                event.update(updates)
+                lines[-1] = json.dumps(event, default=str)
+                filepath.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except Exception as e:
+            logger.warning("Failed to amend trade event: %s", e)
 
     def _write_event(self, trade: TradeEvent) -> None:
         """Append trade event to daily JSONL file."""

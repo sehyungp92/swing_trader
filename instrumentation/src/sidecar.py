@@ -77,7 +77,9 @@ class Sidecar:
         self.data_dir = Path(config["data_dir"])
 
         sc = config.get("sidecar", {})
-        self.relay_url = os.environ.get("RELAY_URL", "") or sc.get("relay_url", "")
+        raw_url = os.environ.get("RELAY_URL", "") or sc.get("relay_url", "")
+        # Ensure relay_url points to the /events ingest endpoint
+        self.relay_url = raw_url.rstrip("/") + "/events" if raw_url and not raw_url.rstrip("/").endswith("/events") else raw_url
         self.batch_size = sc.get("batch_size", 50)
         self.retry_max = sc.get("retry_max", 5)
         self.retry_backoff_base = sc.get("retry_backoff_base_seconds", 10)

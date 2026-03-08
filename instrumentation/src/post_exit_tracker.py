@@ -28,6 +28,10 @@ class PostExitTracker:
     def run_backfill(self) -> list[dict]:
         """Scan recent trade files and backfill post-exit prices.
 
+        Merges results back onto the trade JSONL records so the sidecar
+        forwards enriched events with post_exit_1h_price/4h_price fields.
+        Also writes to a separate post_exit/ file for direct consumption.
+
         Returns list of backfilled result dicts.
         """
         results = []
@@ -35,6 +39,9 @@ class PostExitTracker:
 
         if not self._trades_dir.exists():
             return results
+
+        # Collect results per source file for efficient in-place amendment
+        amendments_by_file: dict[Path, list[dict]] = {}
 
         for filepath in sorted(self._trades_dir.glob("trades_*.jsonl")):
             with open(filepath) as f:
@@ -63,9 +70,13 @@ class PostExitTracker:
                     result = self._backfill_trade(trade, exit_time)
                     if result:
                         results.append(result)
+                        amendments_by_file.setdefault(filepath, []).append(result)
 
         if results:
             self._write_results(results)
+            # Merge results back onto trade JSONL records
+            for filepath, file_results in amendments_by_file.items():
+                self._amend_trade_file(filepath, file_results)
 
         return results
 
@@ -99,12 +110,41 @@ class PostExitTracker:
                 "exit_time": trade["exit_time"],
                 "post_exit_1h_pct": round(move_1h, 4),
                 "post_exit_4h_pct": round(move_4h, 4),
-                "price_1h": price_1h,
-                "price_4h": price_4h,
+                "post_exit_1h_price": price_1h,
+                "post_exit_4h_price": price_4h,
             }
         except Exception as e:
             logger.debug("Post-exit backfill failed for %s: %s", trade.get("trade_id"), e)
             return None
+
+    def _amend_trade_file(self, filepath: Path, results: list[dict]) -> None:
+        """Merge post-exit data back onto trade JSONL records by trade_id."""
+        try:
+            lookup = {r["trade_id"]: r for r in results}
+            lines = filepath.read_text(encoding="utf-8").rstrip("\n").split("\n")
+            modified = False
+
+            for i, line in enumerate(lines):
+                if not line.strip():
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                tid = event.get("trade_id")
+                if tid in lookup:
+                    r = lookup[tid]
+                    event["post_exit_1h_pct"] = r["post_exit_1h_pct"]
+                    event["post_exit_4h_pct"] = r["post_exit_4h_pct"]
+                    event["post_exit_1h_price"] = r["post_exit_1h_price"]
+                    event["post_exit_4h_price"] = r["post_exit_4h_price"]
+                    lines[i] = json.dumps(event, default=str)
+                    modified = True
+
+            if modified:
+                filepath.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except Exception as e:
+            logger.warning("Failed to amend trade file %s: %s", filepath, e)
 
     def _write_results(self, results: list[dict]) -> None:
         """Append results to daily JSONL file."""
