@@ -508,9 +508,45 @@ class BreakoutEngine:
 
         daily_slope = compute_daily_slope(closes)
 
+        # Emit indicator snapshot at breakout evaluation
+        if self._kit and direction is not None:
+            self._kit.on_indicator_snapshot(
+                pair=symbol,
+                indicators={
+                    "atr14_d": atr14_d,
+                    "atr50_d": atr50_d,
+                    "squeeze_metric": squeeze_metric,
+                    "containment": containment,
+                    "chop_score": chop_score,
+                    "box_high": campaign.box_high,
+                    "box_low": campaign.box_low,
+                    "box_height": box_height,
+                    "close": close_today,
+                    "adx_4h": adx_4h,
+                    "regime_4h": regime_4h.value if hasattr(regime_4h, "value") else str(regime_4h),
+                },
+                signal_name="breakout_v3",
+                signal_strength=0.0,
+                decision="enter",
+                strategy_id="SWING_BREAKOUT_V3",
+            )
+            _snap = self._kit.capture_snapshot(symbol)
+            if _snap:
+                self._kit.on_orderbook_context(
+                    pair=symbol,
+                    best_bid=_snap.get("bid", 0),
+                    best_ask=_snap.get("ask", 0),
+                    trade_context="signal_eval",
+                )
+
         if direction and gates.hard_block(direction, regime_4h, daily_slope, atr14_d):
             logger.info("%s: hard block %s", symbol, direction)
             if self._kit:
+                self._kit.on_filter_decision(
+                    pair=symbol, filter_name="hard_block",
+                    passed=False, threshold=0.0, actual_value=0.0,
+                    signal_name="breakout_v3", strategy_id="SWING_BREAKOUT_V3",
+                )
                 self._kit.log_missed(
                     pair=symbol,
                     side="LONG" if direction == Direction.LONG else "SHORT",
@@ -526,6 +562,11 @@ class BreakoutEngine:
         if chop_mode == ChopMode.HALT and direction is not None:
             logger.info("%s: CHOP HALT blocks %s breakout", symbol, direction.name)
             if self._kit:
+                self._kit.on_filter_decision(
+                    pair=symbol, filter_name="chop_halt",
+                    passed=False, threshold=0.0, actual_value=chop_score,
+                    signal_name="breakout_v3", strategy_id="SWING_BREAKOUT_V3",
+                )
                 self._kit.log_missed(
                     pair=symbol,
                     side="LONG" if direction == Direction.LONG else "SHORT",
@@ -542,6 +583,11 @@ class BreakoutEngine:
             dir_str = "LONG" if direction == Direction.LONG else "SHORT"
             if dir_str not in cfg.allowed_directions:
                 if self._kit:
+                    self._kit.on_filter_decision(
+                        pair=symbol, filter_name="direction_filter",
+                        passed=False, threshold=0.0, actual_value=0.0,
+                        signal_name="breakout_v3", strategy_id="SWING_BREAKOUT_V3",
+                    )
                     self._kit.log_missed(
                         pair=symbol,
                         side=dir_str,

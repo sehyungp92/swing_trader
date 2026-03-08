@@ -105,10 +105,11 @@ class DailySnapshotBuilder:
         builder.save(snapshot)
     """
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, experiment_registry=None):
         self.bot_id = config["bot_id"]
         self.strategy_type = config.get("strategy_type", "multi_strategy")
         self.data_dir = Path(config["data_dir"])
+        self.experiment_registry = experiment_registry
 
     def build(self, date_str: str = None) -> DailySnapshot:
         if date_str is None:
@@ -322,7 +323,13 @@ class DailySnapshotBuilder:
         snapshot.error_count = len(errors)
 
         # --- ACTIVE EXPERIMENTS ---
-        snapshot.active_experiments = self._load_active_experiments()
+        if self.experiment_registry is not None:
+            try:
+                snapshot.active_experiments = self.experiment_registry.export_active()
+            except Exception:
+                snapshot.active_experiments = self._load_active_experiments()
+        else:
+            snapshot.active_experiments = self._load_active_experiments()
 
         return snapshot
 
@@ -353,7 +360,7 @@ class DailySnapshotBuilder:
             return {}
         try:
             import yaml
-            with open(config_path) as f:
+            with open(config_path, encoding="utf-8") as f:
                 experiments = yaml.safe_load(f) or {}
             return {
                 exp_id: {

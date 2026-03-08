@@ -30,10 +30,16 @@ _PRIORITY_MAP = {
     "missed_opportunity": 3,
     "daily_snapshot": 3,
     "order": 3,
+    "market_snapshot": 4,
     "process_quality": 4,
     "post_exit": 4,
     "coordinator_action": 4,
     "heartbeat": 4,
+    # Phase 2B enriched event types
+    "indicator_snapshot": 5,
+    "filter_decision": 5,
+    "orderbook_context": 4,
+    "parameter_change": 3,
 }
 
 _DIR_TO_EVENT_TYPE = {
@@ -42,9 +48,16 @@ _DIR_TO_EVENT_TYPE = {
     "errors": "error",
     "scores": "process_quality",
     "daily": "daily_snapshot",
+    "snapshots": "market_snapshot",
     "post_exit": "post_exit",
     "coordination": "coordinator_action",
     "orders": "order",
+    "heartbeat": "heartbeat",
+    # Phase 2B enriched event types
+    "indicators": "indicator_snapshot",
+    "filter_decisions": "filter_decision",
+    "orderbook": "orderbook_context",
+    "config_changes": "parameter_change",
 }
 
 

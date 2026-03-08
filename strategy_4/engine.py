@@ -275,6 +275,37 @@ class KeltnerEngine:
             return  # already have a pending entry order
 
         direction = signals.entry_signal(state, cfg)
+
+        # Emit indicator snapshot at Keltner entry evaluation
+        if self._kit:
+            self._kit.on_indicator_snapshot(
+                pair=symbol,
+                indicators={
+                    "close": state.close,
+                    "kelt_upper": state.kelt_upper,
+                    "kelt_middle": state.kelt_middle,
+                    "kelt_lower": state.kelt_lower,
+                    "rsi": state.rsi,
+                    "roc": state.roc,
+                    "volume": state.volume,
+                    "volume_sma": state.volume_sma,
+                    "atr": state.atr,
+                },
+                signal_name=f"keltner_{cfg.entry_mode}",
+                signal_strength=0.0,
+                decision="enter" if direction != Direction.FLAT else "skip",
+                strategy_id=self._strategy_id,
+            )
+            if direction != Direction.FLAT:
+                _snap = self._kit.capture_snapshot(symbol)
+                if _snap:
+                    self._kit.on_orderbook_context(
+                        pair=symbol,
+                        best_bid=_snap.get("bid", 0),
+                        best_ask=_snap.get("ask", 0),
+                        trade_context="signal_eval",
+                    )
+
         if direction == Direction.FLAT:
             # Log missed if price was outside Keltner bands but volume filter blocked
             if self._kit:
@@ -284,6 +315,13 @@ class KeltnerEngine:
                                  or state.close < state.kelt_lower)
                 if vol_blocked and price_outside:
                     missed_side = "LONG" if state.close > state.kelt_upper else "SHORT"
+                    self._kit.on_filter_decision(
+                        pair=symbol, filter_name="volume_filter",
+                        passed=False, threshold=state.volume_sma,
+                        actual_value=state.volume,
+                        signal_name=f"keltner_{cfg.entry_mode}",
+                        strategy_id=self._strategy_id,
+                    )
                     self._kit.log_missed(
                         pair=symbol,
                         side=missed_side,

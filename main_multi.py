@@ -410,6 +410,7 @@ async def main() -> None:
     _daily_snapshot_task = None
     _backfill_task = None
     _heartbeat_task = None
+    _config_check_task = None
 
     if instrumentation_ctx is not None:
         async def _run_daily_snapshot() -> None:
@@ -486,9 +487,86 @@ async def main() -> None:
                     error_counter += 1
                     await asyncio.sleep(60)
 
+        async def _run_config_check() -> None:
+            """Check for parameter changes every 5 minutes."""
+            while True:
+                try:
+                    await asyncio.sleep(300)
+                    for kit_obj in [atrss_kit, helix_kit, breakout_kit, s5_pb_kit, s5_dual_kit]:
+                        if kit_obj is not None:
+                            kit_obj.check_config_changes()
+
+                    # Emit coordinator-level portfolio snapshot + filter decisions
+                    if atrss_kit is not None:
+                        try:
+                            _pos_counts = {
+                                "atrss": len(getattr(atrss_engine, "positions", {})),
+                                "helix": len(getattr(helix_engine, "active_setups", {})),
+                                "breakout": len(getattr(breakout_engine, "active_setups", {})),
+                                "s5_pb": len(getattr(s5_pb_engine, "positions", {})),
+                                "s5_dual": len(getattr(s5_dual_engine, "positions", {})),
+                            }
+                            n_positions = sum(_pos_counts.values())
+
+                            atrss_kit.on_indicator_snapshot(
+                                pair="PORTFOLIO",
+                                indicators={
+                                    "concurrent_positions": float(n_positions),
+                                    "atrss_positions": float(_pos_counts["atrss"]),
+                                    "helix_setups": float(_pos_counts["helix"]),
+                                    "breakout_setups": float(_pos_counts["breakout"]),
+                                    "s5_pb_positions": float(_pos_counts["s5_pb"]),
+                                    "s5_dual_positions": float(_pos_counts["s5_dual"]),
+                                },
+                                signal_name="coordinator_risk_check",
+                                signal_strength=0.0,
+                                decision="skip" if n_positions >= 10 else "enter",
+                                strategy_id="COORDINATOR",
+                            )
+
+                            # Coordinator filter decisions
+                            # heat_cap_R=2.0 is OMS-internal; use position count as proxy
+                            _POSITION_CAP = 10
+                            atrss_kit.on_filter_decision(
+                                pair="PORTFOLIO",
+                                filter_name="portfolio_heat_cap",
+                                passed=n_positions < _POSITION_CAP,
+                                threshold=float(_POSITION_CAP),
+                                actual_value=float(n_positions),
+                                signal_name="coordinator_entry_check",
+                                coordinator_triggered=True,
+                                strategy_id="COORDINATOR",
+                            )
+
+                            # Per-strategy heat checks
+                            _STRATEGY_CAPS = {
+                                "atrss": 4, "helix": 4, "breakout": 2,
+                                "s5_pb": 2, "s5_dual": 2,
+                            }
+                            for _sid, _count in _pos_counts.items():
+                                _cap = _STRATEGY_CAPS.get(_sid, 4)
+                                atrss_kit.on_filter_decision(
+                                    pair="PORTFOLIO",
+                                    filter_name=f"strategy_heat_cap_{_sid}",
+                                    passed=_count < _cap,
+                                    threshold=float(_cap),
+                                    actual_value=float(_count),
+                                    signal_name="coordinator_entry_check",
+                                    coordinator_triggered=True,
+                                    strategy_id="COORDINATOR",
+                                )
+                        except Exception:
+                            pass  # coordinator emission is best-effort
+                except asyncio.CancelledError:
+                    break
+                except Exception:
+                    logger.debug("Config check task error", exc_info=True)
+                    await asyncio.sleep(300)
+
         _daily_snapshot_task = asyncio.create_task(_run_daily_snapshot())
         _backfill_task = asyncio.create_task(_run_backfill())
         _heartbeat_task = asyncio.create_task(_run_heartbeat())
+        _config_check_task = asyncio.create_task(_run_config_check())
         logger.info("Instrumentation periodic tasks started")
 
     # -------------------------------------------------------------------
@@ -534,6 +612,8 @@ async def main() -> None:
         _backfill_task.cancel()
     if _heartbeat_task is not None:
         _heartbeat_task.cancel()
+    if _config_check_task is not None:
+        _config_check_task.cancel()
 
     # 0b. Build final daily snapshot before engines stop
     if instrumentation_ctx is not None:

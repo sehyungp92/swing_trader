@@ -69,6 +69,23 @@ class InstrumentationKit:
         self.ctx = ctx
         self.strategy_id = strategy_id
 
+        # ConfigWatcher — initialized lazily on first check_config_changes()
+        self._config_watcher = None
+        try:
+            from .config_watcher import ConfigWatcher
+            experiments_path = Path(ctx.data_dir).parent / "config" / "experiments.yaml"
+            yaml_paths = [experiments_path] if experiments_path.exists() else []
+            self._config_watcher = ConfigWatcher(
+                config={"bot_id": ctx.bot_id or self.strategy_id,
+                         "data_dir": ctx.data_dir,
+                         "data_source_id": "ibkr_execution"},
+                config_modules=["strategy.config"],
+                yaml_paths=yaml_paths,
+            )
+            self._config_watcher.take_baseline()
+        except Exception:
+            pass  # config watching is optional
+
     def log_entry(
         self,
         trade_id: str,
@@ -137,6 +154,21 @@ class InstrumentationKit:
             if self.ctx is None or self.ctx.trade_logger is None:
                 return {}
 
+            # Auto-assign experiment variant if not provided
+            nonlocal experiment_id, experiment_variant
+            if not experiment_id and self.experiment_registry is not None:
+                try:
+                    for exp in self.experiment_registry.active_experiments():
+                        if exp.strategy_type and exp.strategy_type not in ("", self.strategy_id, "coordinator"):
+                            continue
+                        experiment_id = exp.experiment_id
+                        experiment_variant = self.experiment_registry.assign_variant(
+                            exp.experiment_id, trade_id,
+                        )
+                        break
+                except Exception:
+                    pass
+
             # Get current market regime
             regime = "unknown"
             if self.ctx.regime_classifier is not None:
@@ -203,6 +235,24 @@ class InstrumentationKit:
                 **gap_ctx,
                 **overlay_ctx,
             )
+
+            # Auto-emit OrderBookContext at entry
+            try:
+                if self.ctx.orderbook_logger is not None:
+                    entry_snap = trade_event.entry_snapshot if isinstance(trade_event.entry_snapshot, dict) else {}
+                    bid = entry_snap.get("bid", 0)
+                    ask = entry_snap.get("ask", 0)
+                    if bid > 0 and ask > 0:
+                        self.ctx.orderbook_logger.log_context(
+                            pair=pair,
+                            best_bid=bid,
+                            best_ask=ask,
+                            trade_context="entry",
+                            related_trade_id=trade_id,
+                            exchange_timestamp=exchange_timestamp,
+                        )
+            except Exception:
+                pass
 
             return trade_event.to_dict() if hasattr(trade_event, 'to_dict') else {}
 
@@ -285,6 +335,25 @@ class InstrumentationKit:
                     strategy_type=self.strategy_id,
                     data_dir=self.ctx.data_dir,
                 )
+
+            # Auto-emit OrderBookContext at exit
+            try:
+                if self.ctx.orderbook_logger is not None:
+                    exit_snap = trade_event.exit_snapshot if isinstance(trade_event.exit_snapshot, dict) else {}
+                    bid = exit_snap.get("bid", 0)
+                    ask = exit_snap.get("ask", 0)
+                    pair = trade_event.pair
+                    if bid > 0 and ask > 0:
+                        self.ctx.orderbook_logger.log_context(
+                            pair=pair,
+                            best_bid=bid,
+                            best_ask=ask,
+                            trade_context="exit",
+                            related_trade_id=trade_id,
+                            exchange_timestamp=exchange_timestamp,
+                        )
+            except Exception:
+                pass
 
             return trade_event.to_dict() if hasattr(trade_event, 'to_dict') else {}
 
@@ -389,6 +458,147 @@ class InstrumentationKit:
             if self.ctx and self.ctx.overnight_gap_tracker:
                 self.ctx.overnight_gap_tracker.record_close(symbol, close_price)
         safe_instrument(_impl)
+
+    def on_indicator_snapshot(
+        self,
+        pair: str,
+        indicators: dict[str, float],
+        signal_name: str,
+        signal_strength: float,
+        decision: str,
+        strategy_id: str = "",
+        overlay_state: dict | None = None,
+        drawdown_tier: str = "",
+        market_session: str = "",
+        exchange_timestamp=None,
+        bar_id: str | None = None,
+    ) -> None:
+        """Fire-and-forget indicator snapshot at signal evaluation."""
+        try:
+            if self.ctx is None or self.ctx.indicator_logger is None:
+                return
+
+            # Auto-capture context
+            context: Dict[str, Any] = {}
+            if overlay_state:
+                context["overlay_state"] = overlay_state
+            elif self.ctx.overlay_state_provider is not None:
+                try:
+                    signals = self.ctx.overlay_state_provider()
+                    context["overlay_state"] = {
+                        "qqq_ema_bullish": signals.get("QQQ", False),
+                        "gld_ema_bullish": signals.get("GLD", False),
+                    }
+                except Exception:
+                    pass
+
+            if drawdown_tier:
+                context["drawdown_tier"] = drawdown_tier
+            elif self.ctx.drawdown_tracker is not None:
+                dd_ctx = self.ctx.drawdown_tracker.get_entry_context()
+                context["drawdown_tier"] = dd_ctx.get("drawdown_tier_at_entry", "NORMAL")
+
+            if market_session:
+                context["market_session"] = market_session
+            else:
+                from .session_classifier import SessionClassifier
+                session_ctx = SessionClassifier.classify(datetime.now())
+                context["market_session"] = session_ctx.get("market_session", "")
+
+            self.ctx.indicator_logger.log_snapshot(
+                pair=pair,
+                indicators=indicators,
+                signal_name=signal_name,
+                signal_strength=signal_strength,
+                decision=decision,
+                strategy_type=strategy_id or self.strategy_id,
+                exchange_timestamp=exchange_timestamp,
+                bar_id=bar_id,
+                context=context,
+            )
+        except Exception:
+            pass  # instrumentation must never affect trading
+
+    def on_filter_decision(
+        self,
+        pair: str,
+        filter_name: str,
+        passed: bool,
+        threshold: float,
+        actual_value: float,
+        signal_name: str = "",
+        signal_strength: float = 0.0,
+        strategy_id: str = "",
+        coordinator_triggered: bool = False,
+        exchange_timestamp=None,
+        bar_id: str | None = None,
+    ) -> None:
+        """Fire-and-forget filter decision event."""
+        try:
+            if self.ctx is None or self.ctx.filter_logger is None:
+                return
+            self.ctx.filter_logger.log_decision(
+                pair=pair,
+                filter_name=filter_name,
+                passed=passed,
+                threshold=threshold,
+                actual_value=actual_value,
+                signal_name=signal_name,
+                signal_strength=signal_strength,
+                strategy_type=strategy_id or self.strategy_id,
+                coordinator_triggered=coordinator_triggered,
+                exchange_timestamp=exchange_timestamp,
+                bar_id=bar_id,
+            )
+        except Exception:
+            pass
+
+    def on_orderbook_context(
+        self,
+        pair: str,
+        best_bid: float,
+        best_ask: float,
+        trade_context: str | None = None,
+        related_trade_id: str | None = None,
+        bid_depth_10bps: float = 0.0,
+        ask_depth_10bps: float = 0.0,
+        bid_levels: list[dict] | None = None,
+        ask_levels: list[dict] | None = None,
+        exchange_timestamp=None,
+    ) -> None:
+        """Fire-and-forget order book context capture."""
+        try:
+            if self.ctx is None or self.ctx.orderbook_logger is None:
+                return
+            self.ctx.orderbook_logger.log_context(
+                pair=pair,
+                best_bid=best_bid,
+                best_ask=best_ask,
+                trade_context=trade_context,
+                related_trade_id=related_trade_id,
+                bid_depth_10bps=bid_depth_10bps,
+                ask_depth_10bps=ask_depth_10bps,
+                bid_levels=bid_levels,
+                ask_levels=ask_levels,
+                exchange_timestamp=exchange_timestamp,
+            )
+        except Exception:
+            pass
+
+    def check_config_changes(self) -> None:
+        """Call periodically from main loop. Fire-and-forget."""
+        try:
+            if self._config_watcher is not None:
+                self._config_watcher.check()
+        except Exception:
+            pass
+
+    @property
+    def experiment_registry(self):
+        """Access to experiment registry for variant assignment."""
+        if self.ctx is None:
+            return None
+        return getattr(self.ctx, "experiment_registry", None)
 
     def capture_snapshot(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Capture a market snapshot for a symbol.
@@ -506,7 +716,7 @@ class InstrumentationKit:
                 positions, portfolio_exposure = self._build_position_snapshot()
 
             heartbeat_data = {
-                "bot_id": self.ctx.data_dir.split("/")[0] if isinstance(self.ctx.data_dir, str) else "swing_trader",
+                "bot_id": self.ctx.bot_id or self.strategy_id,
                 "active_positions": active_positions,
                 "open_orders": open_orders,
                 "uptime_s": uptime_s,

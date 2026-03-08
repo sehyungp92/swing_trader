@@ -63,7 +63,6 @@ def bootstrap_instrumentation(
     trade_logger = TradeLogger(config, snapshot_service)
     missed_logger = MissedOpportunityLogger(config, snapshot_service)
     process_scorer = ProcessScorer()
-    daily_builder = DailySnapshotBuilder(config)
     regime_classifier = RegimeClassifier(data_provider=data_provider)
     sidecar = Sidecar(config)
 
@@ -71,10 +70,21 @@ def bootstrap_instrumentation(
     from .overnight_gap_tracker import OvernightGapTracker
     from .coordination_logger import CoordinationLogger
     from .order_logger import OrderLogger
+    from .indicator_logger import IndicatorLogger
+    from .filter_logger import FilterLogger
+    from .orderbook_logger import OrderBookLogger
+    from .experiment_registry import ExperimentRegistry
     drawdown_tracker = DrawdownTracker(initial_equity=initial_equity)
     gap_tracker = OvernightGapTracker()
     coordination_logger = CoordinationLogger(config)
     order_logger = OrderLogger(config)
+    indicator_logger = IndicatorLogger(config)
+    filter_logger = FilterLogger(config)
+    orderbook_logger = OrderBookLogger(config)
+
+    experiments_path = Path(config.get("data_dir", "instrumentation/data")).parent / "config" / "experiments.yaml"
+    experiment_registry = ExperimentRegistry(config_path=experiments_path)
+    daily_builder = DailySnapshotBuilder(config, experiment_registry=experiment_registry)
 
     ctx = InstrumentationContext(
         snapshot_service=snapshot_service,
@@ -88,6 +98,11 @@ def bootstrap_instrumentation(
         overnight_gap_tracker=gap_tracker,
         coordination_logger=coordination_logger,
         order_logger=order_logger,
+        indicator_logger=indicator_logger,
+        filter_logger=filter_logger,
+        orderbook_logger=orderbook_logger,
+        experiment_registry=experiment_registry,
+        bot_id=config.get("bot_id", "swing_multi_01"),
         data_dir=config.get("data_dir", "instrumentation/data"),
     )
 

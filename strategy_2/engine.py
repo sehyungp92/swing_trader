@@ -450,6 +450,37 @@ class HelixEngine:
         # 6. Detect new setups
         all_candidates = self._detect_new_setups(now, is_4h_boundary)
 
+        # 6b. Emit indicator snapshots for detected setups
+        if self._kit and all_candidates:
+            for _setup in all_candidates:
+                _daily = self.daily_states.get(_setup.symbol)
+                self._kit.on_indicator_snapshot(
+                    pair=_setup.symbol,
+                    indicators={
+                        "ema_fast_d": _daily.ema_fast if _daily else 0,
+                        "ema_slow_d": _daily.ema_slow if _daily else 0,
+                        "atr_d": _daily.atr_d if _daily else 0,
+                        "trend_strength": _daily.trend_strength if _daily else 0,
+                        "adx": _daily.adx if _daily else 0,
+                        "vol_factor": _daily.vol_factor if _daily else 1.0,
+                        "div_mag_norm": getattr(_setup, "div_mag_norm", 0),
+                    },
+                    signal_name=f"helix_{_setup.setup_class.value.lower()}",
+                    signal_strength=getattr(_setup, "div_mag_norm", 0.5),
+                    decision="enter",
+                    strategy_id="AKC_HELIX",
+                    exchange_timestamp=now,
+                )
+                _snap = self._kit.capture_snapshot(_setup.symbol)
+                if _snap:
+                    self._kit.on_orderbook_context(
+                        pair=_setup.symbol,
+                        best_bid=_snap.get("bid", 0),
+                        best_ask=_snap.get("ask", 0),
+                        trade_context="signal_eval",
+                        exchange_timestamp=now,
+                    )
+
         # 7. Allocate accepted setups (or queue if outside window)
         if all_candidates:
             accepted = allocator.allocate(
@@ -936,6 +967,16 @@ class HelixEngine:
             spread_dollars=spread_dollars,
             spread_bps=spread_bps,
         )
+
+        # Emit filter decision for full eligibility gate
+        if self._kit:
+            self._kit.on_filter_decision(
+                pair=setup.symbol, filter_name="full_eligibility_check",
+                passed=ok, threshold=0.0, actual_value=0.0,
+                signal_name=f"helix_{setup.setup_class.value.lower()}",
+                strategy_id="AKC_HELIX",
+            )
+
         if not ok:
             logger.info("Setup %s %s blocked by gate: %s", setup.symbol, setup.setup_id[:8], reason)
             return

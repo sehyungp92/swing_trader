@@ -27,7 +27,12 @@ class InstrumentationContext:
     overnight_gap_tracker: object = None  # OvernightGapTracker
     coordination_logger: object = None   # CoordinationLogger
     order_logger: object = None           # OrderLogger
+    indicator_logger: object = None       # IndicatorLogger
+    filter_logger: object = None          # FilterLogger
+    orderbook_logger: object = None       # OrderBookLogger
+    experiment_registry: object = None    # ExperimentRegistry
     overlay_state_provider: object = None  # Callable[[], dict[str, bool]]
+    bot_id: str = ""
     data_dir: str = "instrumentation/data"
 
     _started: bool = field(default=False, repr=False)

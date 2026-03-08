@@ -39,6 +39,7 @@ from .config import (
     EARLY_STALL_PARTIAL_FRAC,
     MAX_ENTRY_SLIP_ATR,
     MAX_HOLD_HOURS,
+    MOMENTUM_TOLERANCE_ATR,
     ORDER_EXPIRY_HOURS,
     QUALITY_GATE_THRESHOLD,
     STALL_CHECK_HOURS,
@@ -435,15 +436,45 @@ class ATRSSEngine:
                 continue
 
             # Per-symbol short gate (R1)
-            if daily.trend_dir == Direction.SHORT and not signals.short_symbol_gate(sym, daily, hourly):
+            if daily.trend_dir == Direction.SHORT:
+                _short_safety_passed = signals.short_safety_ok(daily)
                 if self._kit:
-                    self._kit.log_missed(
-                        pair=sym, side="SHORT", signal="short_gate_fail",
-                        signal_id=f"{sym}_short_gate_{now.isoformat()}",
-                        signal_strength=0.0, blocked_by="short_gate",
-                        block_reason="short symbol gate failed",
+                    self._kit.on_filter_decision(
+                        pair=sym, filter_name="short_safety_ok",
+                        passed=_short_safety_passed,
+                        threshold=0.0,
+                        actual_value=daily.ema_fast_slope_5,
+                        signal_name="atrss_entry", strategy_id=STRATEGY_ID,
                     )
-                continue
+                if not _short_safety_passed:
+                    if self._kit:
+                        self._kit.log_missed(
+                            pair=sym, side="SHORT", signal="short_safety_fail",
+                            signal_id=f"{sym}_short_safety_{now.isoformat()}",
+                            signal_strength=0.0, blocked_by="short_safety_ok",
+                            block_reason=f"EMA fast slope {daily.ema_fast_slope_5:.4f} > 0",
+                        )
+                    continue
+
+                _short_gate_passed = signals.short_symbol_gate(sym, daily, hourly)
+                if self._kit:
+                    _adx_thresholds = {"GLD": 22.0, "USO": 22.0, "IBIT": 25.0}
+                    self._kit.on_filter_decision(
+                        pair=sym, filter_name="short_symbol_gate",
+                        passed=_short_gate_passed,
+                        threshold=_adx_thresholds.get(sym, 0.0),
+                        actual_value=daily.adx,
+                        signal_name="atrss_entry", strategy_id=STRATEGY_ID,
+                    )
+                if not _short_gate_passed:
+                    if self._kit:
+                        self._kit.log_missed(
+                            pair=sym, side="SHORT", signal="short_gate_fail",
+                            signal_id=f"{sym}_short_gate_{now.isoformat()}",
+                            signal_strength=0.0, blocked_by="short_gate",
+                            block_reason="short symbol gate failed",
+                        )
+                    continue
 
             # Per-symbol time/day blocking (R2)
             if cfg.blocked_hours_et or cfg.blocked_weekdays:
@@ -469,8 +500,56 @@ class ATRSSEngine:
             if not has_position:
                 # 7a – Pullback (exempt from momentum_ok per backtest)
                 pb_dir = signals.pullback_signal(hourly, daily)
+
+                # Emit indicator snapshot at pullback evaluation
+                if self._kit:
+                    self._kit.on_indicator_snapshot(
+                        pair=sym,
+                        indicators={
+                            "ema_pull": hourly.ema_pull,
+                            "ema_mom": hourly.ema_mom,
+                            "atr_hourly": hourly.atrh,
+                            "atr_daily": daily.atr20,
+                            "adx": daily.adx,
+                            "plus_di": daily.plus_di,
+                            "minus_di": daily.minus_di,
+                            "donchian_high": hourly.donchian_high,
+                            "donchian_low": hourly.donchian_low,
+                            "ema_sep_pct": daily.ema_sep_pct,
+                            "regime_score": daily.score,
+                        },
+                        signal_name="atrss_pullback",
+                        signal_strength=0.0,
+                        decision="enter" if pb_dir != Direction.FLAT else "skip",
+                        strategy_id=STRATEGY_ID,
+                        exchange_timestamp=now,
+                    )
+                    if pb_dir != Direction.FLAT:
+                        _snap = self._kit.capture_snapshot(sym)
+                        if _snap:
+                            self._kit.on_orderbook_context(
+                                pair=sym,
+                                best_bid=_snap.get("bid", 0),
+                                best_ask=_snap.get("ask", 0),
+                                trade_context="signal_eval",
+                                exchange_timestamp=now,
+                            )
+
                 if pb_dir != Direction.FLAT:
                     quality_score = signals.compute_entry_quality(hourly, daily, pb_dir)
+
+                    # Emit quality gate filter decision
+                    if self._kit:
+                        self._kit.on_filter_decision(
+                            pair=sym, filter_name="entry_quality_gate",
+                            passed=quality_score >= QUALITY_GATE_THRESHOLD,
+                            threshold=QUALITY_GATE_THRESHOLD,
+                            actual_value=quality_score,
+                            signal_name="atrss_pullback",
+                            signal_strength=quality_score / 7.0,
+                            strategy_id=STRATEGY_ID,
+                        )
+
                     if quality_score < QUALITY_GATE_THRESHOLD:
                         # Hook 2: Missed opportunity — quality gate
                         if self._kit:
@@ -499,8 +578,55 @@ class ATRSSEngine:
                         arm_high=arm_state.breakout_arm_high,
                         arm_low=arm_state.breakout_arm_low,
                     )
+
+                    # Emit indicator snapshot at breakout evaluation
+                    if self._kit and bo_dir != Direction.FLAT:
+                        self._kit.on_indicator_snapshot(
+                            pair=sym,
+                            indicators={
+                                "ema_pull": hourly.ema_pull,
+                                "ema_mom": hourly.ema_mom,
+                                "atr_hourly": hourly.atrh,
+                                "atr_daily": daily.atr20,
+                                "adx": daily.adx,
+                                "plus_di": daily.plus_di,
+                                "minus_di": daily.minus_di,
+                                "donchian_high": hourly.donchian_high,
+                                "donchian_low": hourly.donchian_low,
+                                "arm_high": arm_state.breakout_arm_high,
+                                "arm_low": arm_state.breakout_arm_low,
+                            },
+                            signal_name="atrss_breakout",
+                            signal_strength=0.0,
+                            decision="enter",
+                            strategy_id=STRATEGY_ID,
+                            exchange_timestamp=now,
+                        )
+                        _snap = self._kit.capture_snapshot(sym)
+                        if _snap:
+                            self._kit.on_orderbook_context(
+                                pair=sym,
+                                best_bid=_snap.get("bid", 0),
+                                best_ask=_snap.get("ask", 0),
+                                trade_context="signal_eval",
+                                exchange_timestamp=now,
+                            )
+
                     if bo_dir != Direction.FLAT:
                         quality_score = signals.compute_entry_quality(hourly, daily, bo_dir)
+
+                        # Emit quality gate filter decision (breakout)
+                        if self._kit:
+                            self._kit.on_filter_decision(
+                                pair=sym, filter_name="entry_quality_gate",
+                                passed=quality_score >= QUALITY_GATE_THRESHOLD,
+                                threshold=QUALITY_GATE_THRESHOLD,
+                                actual_value=quality_score,
+                                signal_name="atrss_breakout",
+                                signal_strength=quality_score / 7.0,
+                                strategy_id=STRATEGY_ID,
+                            )
+
                         if quality_score < QUALITY_GATE_THRESHOLD:
                             # Hook 2: Missed opportunity — quality gate (breakout)
                             if self._kit:
@@ -514,7 +640,26 @@ class ATRSSEngine:
                                     block_reason=f"quality {quality_score:.2f} < {QUALITY_GATE_THRESHOLD}",
                                 )
                             continue
-                        if signals.momentum_ok(hourly, bo_dir) and signals.same_direction_reentry_allowed(reentry, bo_dir, now, daily.regime, daily.trend_dir):
+
+                        _mom_ok = signals.momentum_ok(hourly, bo_dir)
+                        _reentry_ok = signals.same_direction_reentry_allowed(
+                            reentry, bo_dir, now, daily.regime, daily.trend_dir,
+                        )
+
+                        # Emit momentum filter decision
+                        if self._kit:
+                            _mom_tol = MOMENTUM_TOLERANCE_ATR * hourly.atrh
+                            _mom_actual = (hourly.close - hourly.ema_mom if bo_dir == Direction.LONG
+                                           else hourly.ema_mom - hourly.close)
+                            self._kit.on_filter_decision(
+                                pair=sym, filter_name="momentum_ok",
+                                passed=_mom_ok, threshold=_mom_tol,
+                                actual_value=_mom_actual,
+                                signal_name="atrss_breakout",
+                                strategy_id=STRATEGY_ID,
+                            )
+
+                        if _mom_ok and _reentry_ok:
                             cand = self._build_candidate(
                                 sym, CandidateType.BREAKOUT, bo_dir, hourly, daily, cfg,
                             )
