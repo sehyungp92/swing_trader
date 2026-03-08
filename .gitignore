@@ -30,7 +30,8 @@ htmlcov/
 .hypothesis/
 
 # IDE & editor
-.claude/settings.local.json
+.claude/
+.agents/
 .vscode/
 .idea/
 *.swp
