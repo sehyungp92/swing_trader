@@ -198,6 +198,8 @@ class HelixEngine:
 
         # Live market data tickers (populated via reqMktData)
         self._tickers: dict[str, Any] = {}
+        self._risk_halted = False
+        self._risk_halt_reason = ""
 
         # Async tasks
         self._event_task: asyncio.Task | None = None
@@ -853,6 +855,12 @@ class HelixEngine:
 
     async def _arm_setup(self, setup: SetupInstance, now: datetime, is_open_arm: bool = False) -> None:
         """Run full eligibility gates, then place primary entry + conditional catch-up."""
+        if self._risk_halted:
+            logger.warning(
+                "Helix arming suppressed while OMS risk halt is active: %s",
+                self._risk_halt_reason or "unspecified",
+            )
+            return
         inst = self._instruments.get(setup.symbol)
         if inst is None:
             return
@@ -1255,6 +1263,13 @@ class HelixEngine:
 
     async def _maybe_rescue(self, setup: SetupInstance, now: datetime) -> None:
         """Place rescue LIMIT order after primary trigger + 5 min."""
+        if self._risk_halted:
+            logger.warning(
+                "Helix rescue suppressed for %s while OMS risk halt is active: %s",
+                setup.symbol,
+                self._risk_halt_reason or "unspecified",
+            )
+            return
         inst = self._instruments.get(setup.symbol)
         if inst is None:
             return
@@ -1599,6 +1614,13 @@ class HelixEngine:
 
     async def _try_add(self, setup: SetupInstance, now: datetime) -> None:
         """Try to place an add-on entry (spec s15.2)."""
+        if self._risk_halted:
+            logger.warning(
+                "Helix add suppressed for %s while OMS risk halt is active: %s",
+                setup.symbol,
+                self._risk_halt_reason or "unspecified",
+            )
+            return
         cfg = self._config.get(setup.symbol)
         if cfg is None:
             return
@@ -1887,6 +1909,8 @@ class HelixEngine:
 
         if etype == OMSEventType.FILL or etype == OMSEventType.ORDER_FILLED:
             await self._on_fill(oms_id, event.payload or {})
+        elif etype == OMSEventType.RISK_HALT:
+            await self._on_risk_halt((event.payload or {}).get("reason", ""))
         elif etype == OMSEventType.ORDER_REJECTED:
             await self._on_terminal(oms_id, etype)
         elif etype in (OMSEventType.ORDER_CANCELLED, OMSEventType.ORDER_EXPIRED):
@@ -1902,6 +1926,32 @@ class HelixEngine:
                     setup.triggered_ts = datetime.now(timezone.utc)
                     self._schedule_rescue_timer(setup)
                     self._schedule_backstop_timer(setup)
+
+    async def _on_risk_halt(self, reason: str) -> None:
+        """Pause new entries and cancel live entry intents."""
+        if self._risk_halted:
+            return
+
+        self._risk_halted = True
+        self._risk_halt_reason = reason or "OMS risk halt"
+        logger.error("Helix risk halt engaged: %s", self._risk_halt_reason)
+
+        await self._cancel_all_unfilled("risk_halt")
+
+        for oms_order_id in list(self._order_to_setup):
+            try:
+                await self._oms.submit_intent(
+                    Intent(
+                        intent_type=IntentType.CANCEL_ORDER,
+                        strategy_id=STRATEGY_ID,
+                        target_oms_order_id=oms_order_id,
+                    )
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to cancel Helix order %s during risk halt",
+                    oms_order_id,
+                )
 
     async def _handle_coordination(self, payload: dict) -> None:
         """Handle cross-strategy coordination events from StrategyCoordinator."""

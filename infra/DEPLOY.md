@@ -1,6 +1,6 @@
 # Deploying swing_trader on a VPS (Paper Trading Mode)
 
-Deploy the full swing_trader stack (ATRSS, AKC_HELIX, SWING_BREAKOUT_V3 strategies + PostgreSQL + Metabase) on an Ubuntu VPS connected to an IBKR paper trading account. IB Gateway runs headlessly via IBC + Xvfb.
+Deploy the full swing_trader stack (the `main_multi.py` portfolio launcher, PostgreSQL, and the Next.js trading dashboard) on an Ubuntu VPS connected to an IBKR paper trading account. IB Gateway runs headlessly via IBC + Xvfb.
 
 ## Architecture
 
@@ -11,7 +11,7 @@ Ubuntu VPS
 │
 └── Docker
     ├── postgres (127.0.0.1:5432)
-    ├── metabase (port 3000)
+    ├── dashboard (port 3000)
     ├── atrss strategy ────────► IB Gateway:4002
     ├── akc_helix strategy ────► IB Gateway:4002
     └── swing_breakout strategy ► IB Gateway:4002
@@ -48,7 +48,7 @@ sudo timedatectl set-timezone America/New_York
 
 # Firewall
 sudo ufw allow OpenSSH
-sudo ufw allow 3000/tcp    # Metabase (restrict to your IP later)
+sudo ufw allow 3000/tcp    # Trading dashboard (restrict to your IP later)
 sudo ufw enable
 ```
 
@@ -173,7 +173,7 @@ chmod 600 .env
 cd /opt/trading/swing_trader
 
 # Start database and dashboard
-docker compose -f infra/docker-compose.yml up -d postgres metabase
+docker compose -f infra/docker-compose.yml up -d postgres dashboard
 
 # Wait for health check
 docker compose -f infra/docker-compose.yml ps
@@ -191,33 +191,35 @@ docker exec -it trading_postgres psql -U trading_admin -d trading -c \
   "ALTER USER trading_reader WITH PASSWORD 'your_actual_reader_password';"
 ```
 
-## Step 7 — Start Strategies
+## Step 7 — Start Portfolio Launcher
 
 ```bash
-# Build and start all strategies
-docker compose -f infra/docker-compose.yml --profile atrss --profile akc_helix --profile swing_breakout build
-docker compose -f infra/docker-compose.yml --profile atrss --profile akc_helix --profile swing_breakout up -d
+# Build and start the portfolio launcher
+docker compose -f infra/docker-compose.yml --profile portfolio build keltner
+docker compose -f infra/docker-compose.yml --profile portfolio up -d keltner
 
 # Verify
-docker compose -f infra/docker-compose.yml --profile atrss --profile akc_helix --profile swing_breakout ps
+docker compose -f infra/docker-compose.yml --profile portfolio ps keltner
 ```
 
-Start specific strategies only:
+This is the production deployment path that preserves the portfolio heat cap, strategy priorities, and cross-strategy coordination in `main_multi.py`.
+
+Start specific strategies only for isolated debugging:
 ```bash
-docker compose -f infra/docker-compose.yml --profile atrss up -d                              # ATRSS only
-docker compose -f infra/docker-compose.yml --profile atrss --profile swing_breakout up -d      # ATRSS + Breakout
+docker compose -f infra/docker-compose.yml --profile atrss up -d atrss                         # ATRSS only
+docker compose -f infra/docker-compose.yml --profile atrss --profile swing_breakout up -d atrss swing_breakout
 ```
+
+Do not run the standalone strategy profiles alongside `keltner` in production, or you will duplicate trading logic and change portfolio behavior.
 
 ## Step 8 — Verify
 
 ### Strategy logs
 ```bash
-docker compose -f infra/docker-compose.yml --profile atrss logs -f atrss
-docker compose -f infra/docker-compose.yml --profile akc_helix logs -f akc_helix
-docker compose -f infra/docker-compose.yml --profile swing_breakout logs -f swing_breakout
+docker compose -f infra/docker-compose.yml --profile portfolio logs -f keltner
 ```
 
-You should see: database bootstrap, IB Gateway connection, strategy engine start, heartbeat messages.
+You should see: database bootstrap, IB Gateway connection, all five strategy engines starting inside `main_multi.py`, and heartbeat messages.
 
 ### Database
 ```bash
@@ -227,16 +229,16 @@ docker exec -it trading_postgres psql -U trading_admin -d trading -c \
 
 ### IB Gateway connectivity from container
 ```bash
-docker exec -it trading_atrss python -c \
+docker exec -it trading_keltner python -c \
   "import socket; s = socket.socket(); s.connect(('host.docker.internal', 4002)); print('Connected!'); s.close()"
 ```
 
-## Step 9 — Metabase Dashboard
+## Step 9 — Trading Dashboard
 
 1. Open `http://YOUR_VPS_IP:3000`
 2. Create admin account
 3. Add database: PostgreSQL, host `postgres`, port 5432, database `trading`, user `trading_reader`
-4. Create dashboards per `infra/metabase-setup.md`
+4. Confirm the dashboard populates portfolio, strategy, position, and order data
 5. Set auto-refresh to 30 seconds
 
 ## Step 10 — Cron Job
@@ -253,7 +255,7 @@ chmod +x /opt/trading/swing_trader/infra/cron/retention.sh
 ## Step 11 — Secure the VPS
 
 ```bash
-# Restrict Metabase to your IP
+# Restrict the trading dashboard to your IP
 sudo ufw delete allow 3000/tcp
 sudo ufw allow from YOUR_IP to any port 3000
 
@@ -270,11 +272,12 @@ sudo chmod 600 /opt/ibc/config/config.ini
 
 | Action | Command |
 |--------|---------|
-| Restart a strategy | `docker compose -f infra/docker-compose.yml --profile atrss restart atrss` |
-| Stop everything | `docker compose -f infra/docker-compose.yml --profile atrss --profile akc_helix --profile swing_breakout down && sudo systemctl stop ibgateway` |
-| Start everything | `sudo systemctl start ibgateway && sleep 60 && docker compose -f infra/docker-compose.yml up -d && docker compose -f infra/docker-compose.yml --profile atrss --profile akc_helix --profile swing_breakout up -d` |
-| View all logs | `docker compose -f infra/docker-compose.yml --profile atrss --profile akc_helix --profile swing_breakout logs -f --tail=100` |
-| Rebuild after code changes | `git pull && docker compose -f infra/docker-compose.yml --profile atrss --profile akc_helix --profile swing_breakout build && docker compose -f infra/docker-compose.yml --profile atrss --profile akc_helix --profile swing_breakout up -d` |
+| Restart portfolio launcher | `docker compose -f infra/docker-compose.yml --profile portfolio restart keltner` |
+| Stop portfolio launcher | `docker compose -f infra/docker-compose.yml stop keltner` |
+| Stop everything | `docker compose -f infra/docker-compose.yml down && sudo systemctl stop ibgateway` |
+| Start everything | `sudo systemctl start ibgateway && sleep 60 && docker compose -f infra/docker-compose.yml up -d postgres dashboard && docker compose -f infra/docker-compose.yml --profile portfolio up -d keltner` |
+| View portfolio logs | `docker compose -f infra/docker-compose.yml --profile portfolio logs -f --tail=100 keltner` |
+| Rebuild after code changes | `git pull && docker compose -f infra/docker-compose.yml --profile portfolio build keltner && docker compose -f infra/docker-compose.yml --profile portfolio up -d keltner` |
 | Check IB Gateway | `sudo systemctl status ibgateway` / `sudo journalctl -u ibgateway --no-pager -n 30` |
 
 ---
@@ -286,7 +289,7 @@ sudo chmod 600 /opt/ibc/config/config.ini
 | Strategy can't connect to IB Gateway | Check `ss -tlnp \| grep 4002`. Verify `ibgateway` service is running. `extra_hosts` is set in docker-compose.yml. |
 | IB Gateway won't start | Check `java -version`. Check `journalctl -u ibgateway`. Verify credentials in `/opt/ibc/config/config.ini`. |
 | Database connection refused | Check `docker compose -f infra/docker-compose.yml ps` — postgres must show "healthy". Verify passwords match `.env`. |
-| Metabase can't connect to DB | Use host `postgres` (not `localhost`) when configuring inside Metabase. |
+| Dashboard shows no data | Verify `postgres` is healthy and the portfolio launcher has started writing heartbeats to `strategy_state`. |
 | IB Gateway disconnects overnight | Expected — IBKR resets daily ~midnight ET. `AutoRestartTime=00:00` in IBC config handles reconnection. Strategies have `restart: unless-stopped`. |
 | "No security definition found" | Market may be closed. Paper trading data is delayed 15 min and may not be available outside market hours. |
 

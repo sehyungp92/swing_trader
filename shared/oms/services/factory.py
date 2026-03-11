@@ -1,5 +1,6 @@
 """OMS factory for proper initialization with all dependencies."""
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Optional, TYPE_CHECKING
 
 import asyncpg
@@ -24,6 +25,20 @@ if TYPE_CHECKING:
     from shared.market_calendar import MarketCalendar
 
 logger = logging.getLogger(__name__)
+
+
+def _trade_date_for(timestamp: datetime | None = None):
+    """Return the current US trading date in America/New_York."""
+    try:
+        from zoneinfo import ZoneInfo
+        et = ZoneInfo("America/New_York")
+    except Exception:
+        et = timezone(timedelta(hours=-5))
+
+    ts = timestamp or datetime.now(timezone.utc)
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(et).date()
 
 
 async def build_oms_service(
@@ -83,16 +98,15 @@ async def build_oms_service(
         calendar = EventCalendar()
 
     # Risk state providers
-    from datetime import date
     strategy_risk_states: dict[str, StrategyRiskState] = {}
-    portfolio_risk_state = PortfolioRiskState(trade_date=date.today())
+    portfolio_risk_state = PortfolioRiskState(trade_date=_trade_date_for())
     # C5: Track open positions by (strategy_id, symbol) to prevent collision
     # when a single strategy trades multiple symbols concurrently
     open_positions: dict[tuple[str, str], dict] = {}
 
     async def get_strategy_risk(sid: str) -> StrategyRiskState:
         # L1 fix: reset risk state at date boundary
-        today = date.today()
+        today = _trade_date_for()
         if sid in strategy_risk_states:
             existing = strategy_risk_states[sid]
             if existing.trade_date != today:
@@ -108,7 +122,7 @@ async def build_oms_service(
 
     async def get_portfolio_risk() -> PortfolioRiskState:
         # L1 fix: reset portfolio risk state at date boundary
-        today = date.today()
+        today = _trade_date_for()
         if portfolio_risk_state.trade_date != today:
             logger.info("Date boundary detected: resetting portfolio daily risk state")
             portfolio_risk_state.trade_date = today
@@ -138,7 +152,7 @@ async def build_oms_service(
     )
 
     # Execution router
-    router = ExecutionRouter(adapter, repo)
+    router = ExecutionRouter(adapter, repo, bus=bus)
 
     # Intent handler
     handler = IntentHandler(risk_gateway, router, repo, bus)
@@ -237,9 +251,8 @@ async def build_multi_strategy_oms(
         calendar = EventCalendar()
 
     # Risk state providers (shared across strategies)
-    from datetime import date
     strategy_risk_states: dict[str, StrategyRiskState] = {}
-    portfolio_risk_state = PortfolioRiskState(trade_date=date.today())
+    portfolio_risk_state = PortfolioRiskState(trade_date=_trade_date_for())
     # Track positions by (strategy_id, symbol) for correct multi-strategy P&L
     open_positions: dict[tuple[str, str], dict] = {}
 
@@ -247,7 +260,7 @@ async def build_multi_strategy_oms(
     min_urd = min(unit_risk_map.values()) if unit_risk_map else 1.0
 
     async def get_strategy_risk(sid: str) -> StrategyRiskState:
-        today = date.today()
+        today = _trade_date_for()
         if sid in strategy_risk_states:
             existing = strategy_risk_states[sid]
             if existing.trade_date != today:
@@ -262,7 +275,7 @@ async def build_multi_strategy_oms(
         return strategy_risk_states[sid]
 
     async def get_portfolio_risk() -> PortfolioRiskState:
-        today = date.today()
+        today = _trade_date_for()
         if portfolio_risk_state.trade_date != today:
             logger.info("Date boundary detected: resetting portfolio daily risk state")
             portfolio_risk_state.trade_date = today
@@ -292,7 +305,7 @@ async def build_multi_strategy_oms(
     )
 
     # Execution router (shared)
-    router = ExecutionRouter(adapter, repo)
+    router = ExecutionRouter(adapter, repo, bus=bus)
 
     # Intent handler (shared)
     handler = IntentHandler(risk_gateway, router, repo, bus)
@@ -368,7 +381,7 @@ def _wire_adapter_callbacks(
     from ..models.events import OMSEvent, OMSEventType
     from ..models.order import OrderStatus
     from ..engine.state_machine import transition
-    from datetime import datetime, date, timezone
+    from datetime import datetime, timezone
 
     # C5 fix: store task references to prevent GC and enable exception handling
     _background_tasks: set[asyncio.Task] = set()
@@ -406,7 +419,8 @@ def _wire_adapter_callbacks(
                 # C6 fix: use state machine transition instead of direct assignment
                 if transition(order, OrderStatus.ACKED):
                     order.broker_order_ref = broker_ref
-                    order.last_update_at = datetime.now(timezone.utc)
+                    order.acked_at = datetime.now(timezone.utc)
+                    order.last_update_at = order.acked_at
                     await repo.save_order(order)
                     bus.emit_order_event(order)
                     logger.debug(f"Adapter ack emitted: {oms_order_id} for {order.strategy_id}")
@@ -512,7 +526,7 @@ def _wire_adapter_callbacks(
 
             if sid not in strategy_risk_states:
                 strategy_risk_states[sid] = StrategyRiskState(
-                    strategy_id=sid, trade_date=date.today()
+                    strategy_id=sid, trade_date=_trade_date_for(fill_ts)
                 )
             strat_risk = strategy_risk_states[sid]
 
@@ -665,7 +679,7 @@ def _wire_adapter_callbacks_multi(
     from ..models.events import OMSEvent, OMSEventType
     from ..models.order import OrderStatus
     from ..engine.state_machine import transition
-    from datetime import datetime, date, timezone
+    from datetime import datetime, timezone
 
     _background_tasks: set[asyncio.Task] = set()
 
@@ -696,7 +710,8 @@ def _wire_adapter_callbacks_multi(
             if order:
                 if transition(order, OrderStatus.ACKED):
                     order.broker_order_ref = broker_ref
-                    order.last_update_at = datetime.now(timezone.utc)
+                    order.acked_at = datetime.now(timezone.utc)
+                    order.last_update_at = order.acked_at
                     await repo.save_order(order)
                     bus.emit_order_event(order)
 
@@ -778,7 +793,7 @@ def _wire_adapter_callbacks_multi(
 
             if sid not in strategy_risk_states:
                 strategy_risk_states[sid] = StrategyRiskState(
-                    strategy_id=sid, trade_date=date.today()
+                    strategy_id=sid, trade_date=_trade_date_for(fill_ts)
                 )
             strat_risk = strategy_risk_states[sid]
 

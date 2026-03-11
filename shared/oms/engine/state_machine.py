@@ -7,7 +7,12 @@ logger = logging.getLogger(__name__)
 # Valid state transitions
 TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
     OrderStatus.CREATED: {OrderStatus.RISK_APPROVED, OrderStatus.REJECTED},
-    OrderStatus.RISK_APPROVED: {OrderStatus.ROUTED, OrderStatus.REJECTED},
+    OrderStatus.RISK_APPROVED: {
+        OrderStatus.ROUTED,
+        OrderStatus.REJECTED,
+        OrderStatus.CANCEL_REQUESTED,
+        OrderStatus.EXPIRED,
+    },
     # H3: CANCELLED added — broker can cancel before ACK (race condition)
     OrderStatus.ROUTED: {OrderStatus.ACKED, OrderStatus.REJECTED, OrderStatus.CANCELLED},
     OrderStatus.ACKED: {

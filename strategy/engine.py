@@ -156,6 +156,8 @@ class ATRSSEngine:
         self._reopen_at: dict[str, datetime] = {}
         # Breakout arm state per symbol (spec Section 7.2)
         self.breakout_arm_states: dict[str, BreakoutArmState] = {}
+        self._risk_halted = False
+        self._risk_halt_reason = ""
 
         # Async tasks
         self._event_task: asyncio.Task | None = None
@@ -1092,6 +1094,12 @@ class ATRSSEngine:
 
     async def _submit_entry(self, candidate: Candidate) -> None:
         """Build OMS intent for an entry or add-on order (stop-limit)."""
+        if self._risk_halted:
+            logger.warning(
+                "ATRSS entry suppressed while OMS risk halt is active: %s",
+                self._risk_halt_reason or "unspecified",
+            )
+            return
         inst = self._instruments.get(candidate.symbol)
         if inst is None:
             return
@@ -1216,6 +1224,12 @@ class ATRSSEngine:
         2. Submit Add-on A as market order
         3. Update stop qty (handled in _on_fill)
         """
+        if self._risk_halted:
+            logger.warning(
+                "%s Add-on A suppressed while OMS risk halt is active: %s",
+                sym, self._risk_halt_reason or "unspecified",
+            )
+            return
         inst = self._instruments.get(sym)
         if inst is None:
             return
@@ -1514,6 +1528,8 @@ class ATRSSEngine:
 
         if etype == OMSEventType.FILL or etype == OMSEventType.ORDER_FILLED:
             await self._on_fill(oms_id, event.payload or {})
+        elif etype == OMSEventType.RISK_HALT:
+            await self._on_risk_halt((event.payload or {}).get("reason", ""))
 
         elif etype == OMSEventType.ORDER_REJECTED:
             # Check if rejection indicates halt/limit state (spec Section 10.1)
@@ -1530,6 +1546,29 @@ class ATRSSEngine:
             OMSEventType.ORDER_EXPIRED,
         ):
             await self._on_terminal(oms_id, etype)
+
+    async def _on_risk_halt(self, reason: str) -> None:
+        """Pause new entries and cancel outstanding entry intents."""
+        if self._risk_halted:
+            return
+
+        self._risk_halted = True
+        self._risk_halt_reason = reason or "OMS risk halt"
+        logger.error("ATRSS risk halt engaged: %s", self._risk_halt_reason)
+
+        for oms_id, meta in list(self.pending_orders.items()):
+            if meta.get("type") == "PARTIAL_CLOSE":
+                continue
+            try:
+                await self._oms.submit_intent(
+                    Intent(
+                        intent_type=IntentType.CANCEL_ORDER,
+                        strategy_id=STRATEGY_ID,
+                        target_oms_order_id=oms_id,
+                    )
+                )
+            except Exception:
+                logger.warning("Failed to cancel ATRSS pending order %s during risk halt", oms_id)
 
     async def _on_fill(self, oms_order_id: str | None, payload: dict) -> None:
         """Handle a fill event — update PositionBook, place/update stop, record trade."""

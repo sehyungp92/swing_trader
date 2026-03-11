@@ -104,6 +104,8 @@ class KeltnerEngine:
         self._pending_entry: dict[str, dict] = {}  # sym -> {direction, stop_dist}
         self._order_to_symbol: dict[str, str] = {}  # oms_order_id -> symbol
         self._order_role: dict[str, str] = {}  # oms_order_id -> "entry"|"stop"|"signal_exit"
+        self._risk_halted = False
+        self._risk_halt_reason = ""
 
         # Resolved IB contracts
         self.contracts: dict[str, Any] = {}
@@ -384,6 +386,14 @@ class KeltnerEngine:
         cfg: SymbolConfig,
     ) -> None:
         """Size, submit MARKET entry via OMS."""
+        if self._risk_halted:
+            logger.warning(
+                "%s: entry suppressed for %s while OMS risk halt is active: %s",
+                self._strategy_id,
+                symbol,
+                self._risk_halt_reason or "unspecified",
+            )
+            return
         atr_val = state.atr
         if atr_val <= 0:
             return
@@ -674,19 +684,17 @@ class KeltnerEngine:
                 role = self._order_role.get(oms_order_id, "")
                 evt = event.event_type
 
-                if evt == OMSEventType.FILL:
-                    fill_price = float(getattr(event, "avg_fill_price", 0)
-                                       or (event.payload or {}).get("avg_fill_price", 0))
-                    fill_qty = int(getattr(event, "filled_qty", 0)
-                                   or (event.payload or {}).get("filled_qty", 0))
+                if evt == OMSEventType.RISK_HALT:
+                    await self._on_risk_halt((event.payload or {}).get("reason", ""))
+                elif evt == OMSEventType.FILL:
+                    fill_price = float((event.payload or {}).get("price", 0))
+                    fill_qty = int((event.payload or {}).get("qty", 0))
                     await self._on_fill(symbol, role, oms_order_id,
                                         fill_price, fill_qty)
 
                 elif evt == OMSEventType.ORDER_FILLED:
-                    fill_price = float(getattr(event, "avg_fill_price", 0)
-                                       or (event.payload or {}).get("avg_fill_price", 0))
-                    fill_qty = int(getattr(event, "filled_qty", 0)
-                                   or (event.payload or {}).get("filled_qty", 0))
+                    fill_price = float((event.payload or {}).get("avg_fill_price", 0))
+                    fill_qty = int((event.payload or {}).get("filled_qty", 0))
                     await self._on_fill(symbol, role, oms_order_id,
                                         fill_price, fill_qty)
 
@@ -698,6 +706,33 @@ class KeltnerEngine:
             except Exception:
                 logger.exception("%s: Error processing OMS event",
                                  self._strategy_id)
+
+    async def _on_risk_halt(self, reason: str) -> None:
+        """Pause new entries and cancel outstanding entry intents."""
+        if self._risk_halted:
+            return
+
+        self._risk_halted = True
+        self._risk_halt_reason = reason or "OMS risk halt"
+        logger.error("%s: risk halt engaged: %s", self._strategy_id, self._risk_halt_reason)
+
+        for oms_order_id, role in list(self._order_role.items()):
+            if role != "entry":
+                continue
+            try:
+                await self._oms.submit_intent(
+                    Intent(
+                        intent_type=IntentType.CANCEL_ORDER,
+                        strategy_id=self._strategy_id,
+                        target_oms_order_id=oms_order_id,
+                    )
+                )
+            except Exception:
+                logger.warning(
+                    "%s: failed to cancel entry order %s during risk halt",
+                    self._strategy_id,
+                    oms_order_id,
+                )
 
     async def _on_fill(
         self,

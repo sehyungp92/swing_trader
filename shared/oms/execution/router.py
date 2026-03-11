@@ -10,6 +10,7 @@ from ..models.position import Position
 from ..engine.state_machine import transition
 
 if TYPE_CHECKING:
+    from ..events.bus import EventBus
     from ..persistence.repository import OMSRepository
 
 logger = logging.getLogger(__name__)
@@ -30,9 +31,10 @@ class ExecutionRouter:
     Priority: stops/exits > cancels > replaces > new entries.
     """
 
-    def __init__(self, adapter, repo: "OMSRepository"):
+    def __init__(self, adapter, repo: "OMSRepository", bus: "EventBus | None" = None):
         self._adapter = adapter  # IBKRExecutionAdapter
         self._repo = repo
+        self._bus = bus
         self._queue: list[tuple[OrderPriority, OMSOrder, dict]] = []
         self._drain_task: Optional[asyncio.Task] = None
         self._running = False
@@ -61,8 +63,10 @@ class ExecutionRouter:
         """Background loop that drains queue when adapter is not congested."""
         while self._running:
             try:
-                if self._queue and not self._adapter.is_congested:
-                    await self.drain_queue()
+                if self._queue:
+                    await self._expire_stale_queued_orders()
+                    if not self._adapter.is_congested:
+                        await self.drain_queue()
                 await asyncio.sleep(DRAIN_INTERVAL_SEC)
             except asyncio.CancelledError:
                 break
@@ -158,9 +162,17 @@ class ExecutionRouter:
         """
         if self._adapter.is_congested:
             return
+        await self._expire_stale_queued_orders()
+        self._queue.sort(key=lambda x: x[0])
+        while self._queue and not self._adapter.is_congested:
+            _, order, _ = self._queue.pop(0)
+            await self._submit_to_adapter(order)
+
+    async def _expire_stale_queued_orders(self) -> None:
+        """Expire stale queued orders even if adapter congestion persists."""
         now = datetime.now(timezone.utc)
-        # H2: Filter out expired orders before processing
         fresh: list[tuple[OrderPriority, OMSOrder, dict]] = []
+
         for priority, order, meta in self._queue:
             queued_at = meta.get("queued_at")
             if queued_at and (now - queued_at).total_seconds() > QUEUE_TTL_SECONDS:
@@ -168,12 +180,19 @@ class ExecutionRouter:
                     f"Expiring stale queued order {order.oms_order_id} "
                     f"(queued {(now - queued_at).total_seconds():.0f}s ago)"
                 )
-                transition(order, OrderStatus.EXPIRED)
-                await self._repo.save_order(order)
+                if transition(order, OrderStatus.EXPIRED):
+                    order.last_update_at = now
+                    await self._repo.save_order(order)
+                    await self._repo.save_event(
+                        order.oms_order_id,
+                        "QUEUE_EXPIRED",
+                        {"queued_seconds": (now - queued_at).total_seconds()},
+                    )
+                    if self._bus is not None:
+                        self._bus.emit_order_event(order)
+                else:
+                    fresh.append((priority, order, meta))
             else:
                 fresh.append((priority, order, meta))
+
         self._queue = fresh
-        self._queue.sort(key=lambda x: x[0])
-        while self._queue and not self._adapter.is_congested:
-            _, order, _ = self._queue.pop(0)
-            await self._submit_to_adapter(order)

@@ -67,6 +67,19 @@ class EventBus:
             timestamp=order.last_update_at or order.created_at or datetime.now(timezone.utc),
             strategy_id=order.strategy_id,
             oms_order_id=order.oms_order_id,
+            payload={
+                "status": order.status.value,
+                "qty": order.qty,
+                "filled_qty": order.filled_qty,
+                "remaining_qty": order.remaining_qty,
+                "avg_fill_price": order.avg_fill_price,
+                "reject_reason": order.reject_reason,
+                "client_order_id": order.client_order_id,
+                "broker_order_id": order.broker_order_id,
+                "side": order.side.value,
+                "order_type": order.order_type.value,
+                "role": order.role.value,
+            },
         )
         self._dispatch(event)
 
@@ -120,7 +133,16 @@ class EventBus:
         )
 
     def _dispatch(self, event: OMSEvent) -> None:
-        for q in self._subscribers.get(event.strategy_id, []):
+        if event.strategy_id:
+            targets = list(self._subscribers.get(event.strategy_id, []))
+        else:
+            targets = [
+                q
+                for queues in self._subscribers.values()
+                for q in queues
+            ]
+
+        for q in targets:
             try:
                 q.put_nowait(event)
             except asyncio.QueueFull:

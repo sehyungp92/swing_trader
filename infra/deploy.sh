@@ -138,9 +138,9 @@ log "ibgateway service enabled (not started — configure IBC first)"
 # ── Step 8: Configure firewall ──────────────────────────────
 log "Configuring firewall..."
 ufw allow OpenSSH
-ufw allow 3000/tcp comment 'Metabase dashboard'
+ufw allow 3000/tcp comment 'Trading dashboard'
 ufw --force enable
-log "Firewall enabled (SSH + Metabase port 3000)"
+log "Firewall enabled (SSH + trading dashboard port 3000)"
 warn "Restrict port 3000 to your IP later: sudo ufw delete allow 3000/tcp && sudo ufw allow from YOUR_IP to any port 3000"
 
 # ── Step 9: Create directories and set permissions ───────────
@@ -185,8 +185,8 @@ echo "  1. Edit IBKR credentials:  sudo nano /opt/ibc/config/config.ini"
 echo "  2. Edit environment vars:  nano $PROJECT_DIR/.env"
 echo "  3. Start IB Gateway:       sudo systemctl start ibgateway"
 echo "  4. Wait 60s, then verify:  ss -tlnp | grep 4002"
-echo "  5. Start infrastructure:   cd $PROJECT_DIR && docker compose -f infra/docker-compose.yml up -d postgres metabase"
-echo "  6. Start strategies:       docker compose -f infra/docker-compose.yml --profile atrss --profile akc_helix --profile swing_breakout up -d"
+echo "  5. Start infrastructure:   cd $PROJECT_DIR && docker compose -f infra/docker-compose.yml up -d postgres dashboard"
+echo "  6. Start portfolio:        docker compose -f infra/docker-compose.yml --profile portfolio build keltner && docker compose -f infra/docker-compose.yml --profile portfolio up -d keltner"
 echo ""
 echo "See $PROJECT_DIR/infra/DEPLOY.md for full documentation."
 echo ""
