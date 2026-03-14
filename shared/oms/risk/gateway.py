@@ -135,15 +135,18 @@ class RiskGateway:
                 )
 
         # Priority-aware heat reservation: when remaining heat is tight,
-        # reserve capacity for higher-priority strategies
+        # reserve capacity for higher-priority strategies that are IDLE
+        # (no open exposure). Strategies already deployed don't need reservation.
         remaining_R = self._config.heat_cap_R - (port_risk.open_risk_R + port_risk.pending_entry_risk_R)
         if remaining_R < 2 * new_risk_R:
             for other_cfg in self._config.strategy_configs.values():
                 if other_cfg.priority < strat_cfg.priority:
-                    return (
-                        f"Heat cap reserved: {remaining_R:.2f}R remaining, "
-                        f"priority strategy {other_cfg.strategy_id} may need it"
-                    )
+                    other_risk = await self._get_strat_risk(other_cfg.strategy_id)
+                    if other_risk.open_risk_R == 0:
+                        return (
+                            f"Heat cap reserved: {remaining_R:.2f}R remaining, "
+                            f"priority strategy {other_cfg.strategy_id} may need it"
+                        )
 
         # 7. Order type allowed
         if not strat_cfg.is_order_type_allowed(order.role, order.order_type):

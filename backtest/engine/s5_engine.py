@@ -128,6 +128,12 @@ class S5Engine:
     def force_flatten(self) -> None:
         """Reverse an entry rejected by portfolio heat cap."""
         self.broker.cancel_all(self.symbol)
+        # Reverse entry commission leaked by the phantom fill
+        if self.active_position is not None:
+            entry_comm = getattr(self.active_position, "commission", 0.0)
+            if entry_comm > 0:
+                self.equity += entry_comm
+                self.total_commission -= entry_comm
         self.active_position = None
 
     def run(self, daily: NumpyBars) -> None:

@@ -104,11 +104,8 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
-try:
-    import zoneinfo
-    _ET = zoneinfo.ZoneInfo("America/New_York")
-except Exception:
-    _ET = timezone(timedelta(hours=-5))
+from zoneinfo import ZoneInfo as _ZoneInfo
+_ET = _ZoneInfo("America/New_York")
 
 
 # ---------------------------------------------------------------------------
@@ -1525,7 +1522,7 @@ class BreakoutEngine:
                     if candidate < new_stop:
                         new_stop = candidate
 
-            if not setup.tp1_done and r_state >= tp1_r:
+            if not setup.tp1_done and not setup.tp1_order_id and r_state >= tp1_r:
                 setup.tp1_done = True
                 pos.tp1_done = True
                 tp1_hit_this_bar = True
@@ -1573,7 +1570,8 @@ class BreakoutEngine:
                     pos.current_stop = new_stop
 
             # Stop hit check — covers pre-runner trail and any stop ratchets
-            if not tp1_hit_this_bar:
+            # Skip if broker owns the stop (stop_order_id is set)
+            if not tp1_hit_this_bar and not setup.stop_order_id:
                 stopped = (
                     (setup.direction == Direction.LONG and current_price <= setup.current_stop)
                     or (setup.direction == Direction.SHORT and current_price >= setup.current_stop)
@@ -1617,15 +1615,13 @@ class BreakoutEngine:
             tif="GTC",
             role=OrderRole.EXIT,
         )
-        await self._oms.submit_intent(
+        receipt = await self._oms.submit_intent(
             Intent(intent_type=IntentType.NEW_ORDER, strategy_id=STRATEGY_ID, order=partial_order)
         )
 
-        # Update position tracking
-        setup.qty_open = max(0, setup.qty_open - qty)
-        pos = self.positions.get(setup.symbol)
-        if pos:
-            pos.qty = max(0, pos.qty - qty)
+        # Track the partial close order — fill handler will update qty_open
+        if receipt and receipt.oms_order_id:
+            self._track_order(receipt.oms_order_id, setup.setup_id, "partial_close", qty)
 
     async def _update_runner_trailing_stop(
         self, setup: SetupInstance, pos: PositionState, symbol: str, now_et: datetime,
@@ -1698,6 +1694,13 @@ class BreakoutEngine:
         self, setup: SetupInstance, exit_price: float, reason: str, now: datetime,
     ) -> None:
         """Submit close order and record trade."""
+        # Guard: no-op if already closed or broker already exiting
+        if setup.qty_open <= 0:
+            return
+        if self._has_pending_exit(setup):
+            logger.info("%s: Skipping engine close — exit order already in flight", setup.symbol)
+            return
+
         inst = self._instruments.get(setup.symbol)
         if not inst:
             return
@@ -1715,6 +1718,8 @@ class BreakoutEngine:
         await self._oms.submit_intent(
             Intent(intent_type=IntentType.NEW_ORDER, strategy_id=STRATEGY_ID, order=close_order)
         )
+        # Cancel any outstanding bracket orders before finalizing
+        await self._cancel_remaining_exit_orders(setup, except_kind="engine_close")
         await self._finalize_closed_setup(
             setup,
             exit_price,
@@ -1722,88 +1727,16 @@ class BreakoutEngine:
             now,
             order_id=setup.stop_order_id or setup.primary_order_id or "",
         )
-        return
 
-        # Update state
-        setup.state = SetupState.CLOSED
-        setup.qty_open = 0
-        if setup.symbol in self.positions:
-            self.positions[setup.symbol].qty = 0
-
-        # Store re-entry info on campaign (spec §21)
-        campaign = self.campaigns.get(setup.symbol)
-        if campaign:
-            exit_date = now.date() if isinstance(now, datetime) else now
-            campaign.last_exit_date = exit_date
-            campaign.last_exit_direction = setup.direction
-            campaign.last_exit_realized_r = setup.r_state
-
-        # Record
-        if self._recorder:
-            ctx = self.campaigns[setup.symbol].daily_context or {}
-            record = TradeRecord(
-                symbol=setup.symbol,
-                direction=setup.direction,
-                entry_type=setup.entry_type,
-                exit_tier=setup.exit_tier,
-                campaign_id=setup.campaign_id,
-                box_version=setup.box_version,
-                entry_ts=setup.fill_ts,
-                exit_ts=now,
-                bars_held=setup.bars_held,
-                days_held=setup.days_held,
-                entry_price=setup.fill_price,
-                exit_price=exit_price,
-                stop_price=setup.stop0,
-                shares=setup.fill_qty,
-                realized_pnl=setup.realized_pnl,
-                r_multiple=setup.r_state,
-                disp_at_entry=ctx.get("disp", 0.0),
-                rvol_d_at_entry=ctx.get("rvol_d", 1.0),
-                regime_at_entry=setup.regime_at_entry or "",
-                quality_mult_at_entry=setup.quality_mult,
-                gap_stop_event=setup.gap_stop_event,
-            )
-            await self._recorder.record(record.__dict__)
-
-        # Hook 5: Instrumentation trade exit + process scoring
-        if self._kit:
-            if setup.direction == Direction.LONG:
-                _mfe_pct = (setup.mfe_price - setup.fill_price) / setup.fill_price if setup.fill_price > 0 else None
-                _mae_pct = (setup.fill_price - setup.mae_price) / setup.fill_price if setup.fill_price > 0 else None
-                _pnl_pct = (exit_price - setup.fill_price) / setup.fill_price if setup.fill_price > 0 else None
-            else:
-                _mfe_pct = (setup.fill_price - setup.mfe_price) / setup.fill_price if setup.fill_price > 0 else None
-                _mae_pct = (setup.mae_price - setup.fill_price) / setup.fill_price if setup.fill_price > 0 else None
-                _pnl_pct = (setup.fill_price - exit_price) / setup.fill_price if setup.fill_price > 0 else None
-            self._kit.log_exit(
-                trade_id=setup.setup_id,
-                exit_price=exit_price,
-                exit_reason=reason,
-                mfe_price=setup.mfe_price,
-                mae_price=setup.mae_price,
-                mfe_r=setup.mfe_r,
-                mae_r=setup.mae_r,
-                mfe_pct=_mfe_pct,
-                mae_pct=_mae_pct,
-                pnl_pct=_pnl_pct,
-            )
-
-            self._kit.on_order_event(
-                order_id=setup.stop_order_id or setup.primary_order_id or "",
-                pair=setup.symbol,
-                side="SELL" if setup.direction == Direction.LONG else "BUY",
-                order_type="STOP",
-                status="FILLED",
-                requested_qty=float(setup.fill_qty),
-                filled_qty=float(setup.fill_qty),
-                requested_price=setup.current_stop,
-                fill_price=exit_price,
-                related_trade_id=setup.setup_id,
-                strategy_id=STRATEGY_ID,
-            )
-
-        logger.info("%s: Position closed — reason=%s, R=%.2f", setup.symbol, reason, setup.r_state)
+    def _has_pending_exit(self, setup: SetupInstance) -> bool:
+        """True if any tracked order for this setup is an exit-type order."""
+        for oms_order_id, setup_id in self._order_to_setup.items():
+            if setup_id != setup.setup_id:
+                continue
+            kind = self._order_kind.get(oms_order_id, "")
+            if kind in {"stop", "partial_close", "engine_close"}:
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Bracket orders (spec §16, §20.2) — protect positions on crash
@@ -1917,6 +1850,87 @@ class BreakoutEngine:
     # ------------------------------------------------------------------
     # OMS Event Processing
     # ------------------------------------------------------------------
+
+    async def _cancel_remaining_exit_orders(
+        self, setup: SetupInstance, except_kind: str,
+    ) -> None:
+        """Cancel outstanding bracket exit orders after a terminal fill.
+
+        On stop fill: cancel TP orders.
+        On TP fill that closes position: cancel stop + remaining TPs.
+        """
+        to_cancel: list[tuple[str, str]] = []  # (order_id, kind)
+        if except_kind != "stop" and setup.stop_order_id:
+            to_cancel.append((setup.stop_order_id, "stop"))
+        if except_kind != "tp1" and setup.tp1_order_id:
+            to_cancel.append((setup.tp1_order_id, "tp1"))
+        if except_kind != "tp2" and setup.tp2_order_id:
+            to_cancel.append((setup.tp2_order_id, "tp2"))
+
+        for order_id, kind in to_cancel:
+            try:
+                await self._oms.submit_intent(
+                    Intent(
+                        intent_type=IntentType.CANCEL_ORDER,
+                        strategy_id=STRATEGY_ID,
+                        target_oms_order_id=order_id,
+                    )
+                )
+                logger.info("%s: Cancelled %s order %s after %s fill",
+                            setup.symbol, kind, order_id, except_kind)
+            except Exception as e:
+                logger.warning("%s: Failed to cancel %s order %s: %s",
+                               setup.symbol, kind, order_id, e)
+            # Clear the reference regardless — broker will handle the cancel
+            self._forget_order(order_id)
+
+    async def _amend_stop_qty(self, setup: SetupInstance) -> None:
+        """Replace the protective stop with updated qty after partial TP fill."""
+        old_stop_id = setup.stop_order_id
+        if not old_stop_id:
+            return
+        inst = self._instruments.get(setup.symbol)
+        if not inst:
+            return
+
+        # Cancel old stop
+        try:
+            await self._oms.submit_intent(
+                Intent(
+                    intent_type=IntentType.CANCEL_ORDER,
+                    strategy_id=STRATEGY_ID,
+                    target_oms_order_id=old_stop_id,
+                )
+            )
+        except Exception as e:
+            logger.warning("%s: Failed to cancel old stop for qty amendment: %s",
+                           setup.symbol, e)
+            return
+        self._forget_order(old_stop_id)
+
+        # Submit replacement stop with reduced qty
+        exit_side = OrderSide.SELL if setup.direction == Direction.LONG else OrderSide.BUY
+        new_stop = OMSOrder(
+            strategy_id=STRATEGY_ID,
+            instrument=inst,
+            side=exit_side,
+            qty=setup.qty_open,
+            order_type=OrderType.STOP,
+            stop_price=setup.current_stop,
+            tif="GTC",
+            role=OrderRole.EXIT,
+            oca_group=setup.oca_group,
+            oca_type=1,
+        )
+        receipt = await self._oms.submit_intent(
+            Intent(intent_type=IntentType.NEW_ORDER, strategy_id=STRATEGY_ID, order=new_stop)
+        )
+        if receipt.oms_order_id:
+            setup.stop_order_id = receipt.oms_order_id
+            self._track_order(receipt.oms_order_id, setup.setup_id, "stop", setup.qty_open)
+            logger.info("%s: Stop qty amended %d → %d (order %s)",
+                        setup.symbol, self._order_requested_qty.get(old_stop_id, 0),
+                        setup.qty_open, receipt.oms_order_id)
 
     def _track_order(
         self,
@@ -2064,6 +2078,9 @@ class BreakoutEngine:
         if pos:
             pos.qty = 0
 
+        # Remove from active_setups so hourly cycle no longer iterates it
+        self.active_setups.pop(setup.setup_id, None)
+
         campaign = self.campaigns.get(setup.symbol)
         if campaign:
             exit_date = now.date() if isinstance(now, datetime) else now
@@ -2179,7 +2196,7 @@ class BreakoutEngine:
                             )
                         continue
 
-                    if order_kind in {"tp1", "tp2", "stop"}:
+                    if order_kind in {"tp1", "tp2", "stop", "partial_close"}:
                         fill_price, fill_qty = self._extract_fill_details(
                             event,
                             fallback_price=setup.current_stop if order_kind == "stop" else setup.fill_price,
@@ -2201,6 +2218,8 @@ class BreakoutEngine:
                                 pos.tp2_done = True
 
                         if order_kind == "stop" or setup.qty_open <= 0 or (pos and pos.qty <= 0):
+                            # Cancel remaining bracket orders before finalizing
+                            await self._cancel_remaining_exit_orders(setup, except_kind=order_kind)
                             await self._finalize_closed_setup(
                                 setup,
                                 fill_price,
@@ -2217,6 +2236,9 @@ class BreakoutEngine:
                                 fill_price,
                                 setup.qty_open,
                             )
+                            # Amend stop qty to match reduced position after partial TP
+                            if order_kind in ("tp1", "tp2") and setup.stop_order_id and setup.qty_open > 0:
+                                await self._amend_stop_qty(setup)
                         continue
 
                     if order_kind != "primary_entry":

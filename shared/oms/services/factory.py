@@ -2,6 +2,7 @@
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional, TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 import asyncpg
 
@@ -27,18 +28,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+_ET = ZoneInfo("America/New_York")
+
+
 def _trade_date_for(timestamp: datetime | None = None):
     """Return the current US trading date in America/New_York."""
-    try:
-        from zoneinfo import ZoneInfo
-        et = ZoneInfo("America/New_York")
-    except Exception:
-        et = timezone(timedelta(hours=-5))
-
     ts = timestamp or datetime.now(timezone.utc)
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
-    return ts.astimezone(et).date()
+    return ts.astimezone(_ET).date()
 
 
 async def build_oms_service(
@@ -256,8 +254,11 @@ async def build_multi_strategy_oms(
     # Track positions by (strategy_id, symbol) for correct multi-strategy P&L
     open_positions: dict[tuple[str, str], dict] = {}
 
-    # Use min unit_risk_dollars as conservative reference for pending risk R conversion
-    min_urd = min(unit_risk_map.values()) if unit_risk_map else 1.0
+    # Use highest-priority strategy's URD as portfolio normalization base.
+    # This ensures 1R means the same dollar amount regardless of which
+    # strategy is requesting entry — matching backtest behavior.
+    _sorted_cfgs = sorted(strategy_configs.values(), key=lambda c: c.priority)
+    portfolio_urd = _sorted_cfgs[0].unit_risk_dollars if _sorted_cfgs else 1.0
 
     async def get_strategy_risk(sid: str) -> StrategyRiskState:
         today = _trade_date_for()
@@ -284,7 +285,7 @@ async def build_multi_strategy_oms(
             portfolio_risk_state.halted = False
             portfolio_risk_state.halt_reason = ""
         portfolio_risk_state.pending_entry_risk_R = await repo.get_pending_entry_risk_R(
-            min_urd
+            portfolio_urd
         )
         return portfolio_risk_state
 
@@ -803,11 +804,13 @@ def _wire_adapter_callbacks_multi(
                 )
                 fill_risk = risk_per_contract * qty
                 fill_risk_R = fill_risk / urd if urd > 0 else 0
+                # Portfolio R uses consistent base so 1R means the same dollars
+                fill_risk_portfolio_R = fill_risk / portfolio_urd if portfolio_urd > 0 else 0
 
                 strat_risk.open_risk_dollars += fill_risk
                 strat_risk.open_risk_R += fill_risk_R
                 portfolio_risk_state.open_risk_dollars += fill_risk
-                portfolio_risk_state.open_risk_R += fill_risk_R
+                portfolio_risk_state.open_risk_R += fill_risk_portfolio_R
 
                 pv = order.instrument.point_value if order.instrument else 1.0
                 pos = open_positions.get(pos_key)
@@ -815,6 +818,7 @@ def _wire_adapter_callbacks_multi(
                     open_positions[pos_key] = {
                         "entry_price": price,
                         "risk_per_contract_R": fill_risk_R / qty if qty > 0 else 0,
+                        "risk_per_contract_portfolio_R": fill_risk_portfolio_R / qty if qty > 0 else 0,
                         "point_value": pv,
                         "side": order.side,
                         "open_qty": qty,
@@ -841,10 +845,11 @@ def _wire_adapter_callbacks_multi(
                 if pos:
                     released_R = pos["risk_per_contract_R"] * qty
                     released_dollars = released_R * urd
+                    released_portfolio_R = pos.get("risk_per_contract_portfolio_R", released_R) * qty
 
                     strat_risk.open_risk_R = max(0, strat_risk.open_risk_R - released_R)
                     strat_risk.open_risk_dollars = max(0, strat_risk.open_risk_dollars - released_dollars)
-                    portfolio_risk_state.open_risk_R = max(0, portfolio_risk_state.open_risk_R - released_R)
+                    portfolio_risk_state.open_risk_R = max(0, portfolio_risk_state.open_risk_R - released_portfolio_R)
                     portfolio_risk_state.open_risk_dollars = max(0, portfolio_risk_state.open_risk_dollars - released_dollars)
 
                     pv = pos["point_value"]
@@ -854,10 +859,11 @@ def _wire_adapter_callbacks_multi(
                         pnl = (pos["entry_price"] - price) * pv * qty
 
                     pnl_R = pnl / urd if urd > 0 else 0
+                    pnl_portfolio_R = pnl / portfolio_urd if portfolio_urd > 0 else 0
                     strat_risk.daily_realized_pnl += pnl
                     strat_risk.daily_realized_R += pnl_R
                     portfolio_risk_state.daily_realized_pnl += pnl
-                    portfolio_risk_state.daily_realized_R += pnl_R
+                    portfolio_risk_state.daily_realized_R += pnl_portfolio_R
 
                     pos["open_qty"] = max(0, pos["open_qty"] - qty)
                     remaining = int(pos["open_qty"])

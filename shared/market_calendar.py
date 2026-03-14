@@ -216,13 +216,8 @@ class MarketCalendar:
         - Market holidays (full closure)
         - Half-day sessions after 12:00 PM ET (no new entries in last hour)
         """
-        try:
-            import zoneinfo
-            et = zoneinfo.ZoneInfo("America/New_York")
-        except Exception:
-            et = timezone(timedelta(hours=-5))
-
-        now_et = now_utc.astimezone(et)
+        from zoneinfo import ZoneInfo
+        now_et = now_utc.astimezone(ZoneInfo("America/New_York"))
         today = now_et.date()
 
         if self.is_market_holiday(today, asset_class):

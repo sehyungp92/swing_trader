@@ -199,11 +199,13 @@ class PortfolioHeatTracker:
         portfolio_daily_stop_R: float,
         strategy_slots: list[StrategySlot],
         equity: float,
+        simulate_live_r_normalization: bool = False,
     ):
         self._heat_cap_R = heat_cap_R
         self._portfolio_daily_stop_R = portfolio_daily_stop_R
         self._strats: dict[str, StrategyHeatState] = {}
         self._portfolio_halted = False
+        self._simulate_live_r = simulate_live_r_normalization
 
         # Use highest-priority strategy's unit_risk_pct as the portfolio
         # normalization base so that portfolio-level R comparisons are
@@ -261,16 +263,29 @@ class PortfolioHeatTracker:
             if strat.open_risk_R + new_risk_R > strat.max_heat_R:
                 return False, f"{strategy_id} heat ceiling ({strat.open_risk_R:.2f}R + {new_risk_R:.2f}R > {strat.max_heat_R}R)"
 
-        # Portfolio heat cap (use portfolio-level unit risk for consistency)
+        # Portfolio heat cap
         total_open_dollars = sum(s.open_risk_dollars for s in self._strats.values())
-        if pu > 0:
+        if self._simulate_live_r:
+            # Live OMS bug simulation: each strategy's open risk is converted
+            # to R using its own URD, so 1R_atrss != 1R_helix in the sum.
+            total_open_R = sum(s.open_risk_R for s in self._strats.values())
+            new_risk_R = risk_dollars / strat.unit_risk_dollars if strat.unit_risk_dollars > 0 else float("inf")
+        elif pu > 0:
+            # Correct: use consistent portfolio-level unit risk
             total_open_R = total_open_dollars / pu
             new_risk_R = risk_dollars / pu
-            if total_open_R + new_risk_R > self._heat_cap_R:
-                return False, f"Portfolio heat cap ({total_open_R:.2f}R + {new_risk_R:.2f}R > {self._heat_cap_R}R)"
+        else:
+            total_open_R = 0.0
+            new_risk_R = 0.0
+        if total_open_R + new_risk_R > self._heat_cap_R:
+            return False, f"Portfolio heat cap ({total_open_R:.2f}R + {new_risk_R:.2f}R > {self._heat_cap_R}R)"
 
         # Priority reservation: if remaining capacity is tight, reserve for higher priority
-        remaining_dollars = (self._heat_cap_R * pu) - total_open_dollars if pu > 0 else 0
+        if self._simulate_live_r:
+            remaining_R = self._heat_cap_R - total_open_R
+            remaining_dollars = remaining_R * strat.unit_risk_dollars if strat.unit_risk_dollars > 0 else 0
+        else:
+            remaining_dollars = (self._heat_cap_R * pu) - total_open_dollars if pu > 0 else 0
         if remaining_dollars < 2 * risk_dollars:
             for other in self._strats.values():
                 if other.priority < strat.priority and other.open_risk_dollars == 0:
@@ -749,7 +764,7 @@ def _rebalance_overlay(
         price = daily[sym].closes[d_idx]
         if signals.get(sym, False) and price > 0 and total_w > 0:
             alloc = available * bullish_w[sym] / total_w
-            overlay_shares[sym] = alloc / price
+            overlay_shares[sym] = int(alloc / price)
         else:
             overlay_shares[sym] = 0.0
 
@@ -844,7 +859,7 @@ def _rebalance_overlay_multi(
             size_factor = 1.0
 
         alloc = available * alloc_pct * size_factor
-        overlay_shares[sym] = alloc / price
+        overlay_shares[sym] = int(alloc / price)
 
 
 def _compute_overlay_value(
@@ -1016,6 +1031,7 @@ def run_unified(
         strategy_slots=[config.atrss, config.helix, config.breakout,
                         config.s5_pb, config.s5_dual],
         equity=init_eq,
+        simulate_live_r_normalization=config.simulate_live_r_normalization,
     )
     coordinator = BacktestCoordinator(
         enable_tighten=config.enable_atrss_helix_tighten,
@@ -1472,14 +1488,29 @@ def run_unified(
 def _force_flatten_helix(engine: HelixEngine, pos) -> None:
     """Reverse a Helix entry that breached the heat cap."""
     engine.broker.cancel_all(engine.symbol)
-    # Undo fill equity impact (commission was already deducted)
-    engine.equity += pos.fill_price * 0  # No PnL to reverse — just opened
+    # Reverse entry commission leaked by the phantom fill
+    entry_comm = getattr(pos, "commission", 0.0)
+    if entry_comm > 0:
+        engine.equity += entry_comm
+        engine.total_commission -= entry_comm
+    engine.setups_filled = max(0, engine.setups_filled - 1)
     engine.active_position = None
 
 
 def _force_flatten_breakout(engine: BreakoutEngine, pos) -> None:
     """Reverse a Breakout entry that breached the heat cap."""
     engine.broker.cancel_all(engine.symbol)
+    # Reverse entry commission leaked by the phantom fill
+    entry_comm = getattr(pos, "commission", 0.0)
+    if entry_comm > 0:
+        engine.equity += entry_comm
+        engine.total_commission -= entry_comm
+    engine.entries_filled = max(0, engine.entries_filled - 1)
+    # Reset campaign state back from POSITION_OPEN to BREAKOUT
+    if hasattr(engine, "campaign") and engine.campaign is not None:
+        from backtest.engine.breakout_engine import CampaignState
+        if engine.campaign.state == CampaignState.POSITION_OPEN:
+            engine.campaign.state = CampaignState.BREAKOUT
     engine.active_position = None
 
 

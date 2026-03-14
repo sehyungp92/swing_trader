@@ -22,36 +22,37 @@ class StrategySlot:
     max_working_orders: int = 4
 
 
-# Default strategy slots — optimized_v2 priority ordering (Feb 19).
+# Default strategy slots — P1 heat-unlock optimized (Mar 14).
+# Raised heat_cap 2.0→3.0 unlocked 682 blocked entries, +54% total PnL,
+# Sharpe 1.24→1.52, ratio 72:28→58:42 overlay:active.
 # ATRSS(0): highest expectancy, always gets first fill.
-# S5_PB(1): 80% WR on IBIT, rare signals — promoting above Breakout/Helix
-#   unblocks 10 trades (vs 4 at priority 3) for +$1,020 PnL.
+# S5_PB(1): 80% WR on IBIT, rare signals.
 # S5_DUAL(2): 70.7% WR on GLD+IBIT, fills IBIT coverage gap.
-# Breakout(3): 78.6% WR but only 3 trades total — priority barely matters.
-# Helix(4): 34% WR, high stale-exit rate (19.6%) — lowest priority.
+# Breakout(3): expanded to QQQ/GLD/IBIT.
+# Helix(4): biggest beneficiary of heat unlock (87→323 trades, $1.5k→$6.5k).
 ATRSS_SLOT = StrategySlot(
     strategy_id="ATRSS", priority=0,
-    unit_risk_pct=0.012, max_heat_R=1.00, daily_stop_R=2.0,
+    unit_risk_pct=0.018, max_heat_R=1.50, daily_stop_R=2.0,
     max_working_orders=4,
 )
 S5_PB_SLOT = StrategySlot(
     strategy_id="S5_PB", priority=1,
-    unit_risk_pct=0.008, max_heat_R=1.50, daily_stop_R=2.0,
+    unit_risk_pct=0.012, max_heat_R=1.50, daily_stop_R=2.0,
     max_working_orders=2,
 )
 S5_DUAL_SLOT = StrategySlot(
     strategy_id="S5_DUAL", priority=2,
-    unit_risk_pct=0.008, max_heat_R=1.50, daily_stop_R=2.0,
+    unit_risk_pct=0.012, max_heat_R=1.50, daily_stop_R=2.0,
     max_working_orders=2,
 )
 BREAKOUT_SLOT = StrategySlot(
     strategy_id="SWING_BREAKOUT_V3", priority=3,
-    unit_risk_pct=0.005, max_heat_R=0.65, daily_stop_R=2.0,
+    unit_risk_pct=0.008, max_heat_R=1.00, daily_stop_R=2.0,
     max_working_orders=2,
 )
 HELIX_SLOT = StrategySlot(
     strategy_id="AKC_HELIX", priority=4,
-    unit_risk_pct=0.005, max_heat_R=0.85, daily_stop_R=2.5,
+    unit_risk_pct=0.008, max_heat_R=1.20, daily_stop_R=2.5,
     max_working_orders=4,
 )
 
@@ -67,11 +68,11 @@ class UnifiedBacktestConfig:
     # Symbol lists per strategy (defaults match production)
     atrss_symbols: list[str] = field(default_factory=lambda: ["QQQ", "GLD"])
     helix_symbols: list[str] = field(default_factory=lambda: ["QQQ", "GLD", "IBIT"])
-    breakout_symbols: list[str] = field(default_factory=lambda: ["QQQ", "GLD"])
+    breakout_symbols: list[str] = field(default_factory=lambda: ["QQQ", "GLD", "IBIT"])
 
     # Portfolio-level risk rules
-    heat_cap_R: float = 2.0
-    portfolio_daily_stop_R: float = 3.0
+    heat_cap_R: float = 3.0
+    portfolio_daily_stop_R: float = 4.0
     atrss: StrategySlot = field(default_factory=lambda: ATRSS_SLOT)
     helix: StrategySlot = field(default_factory=lambda: HELIX_SLOT)
     breakout: StrategySlot = field(default_factory=lambda: BREAKOUT_SLOT)
@@ -132,6 +133,11 @@ class UnifiedBacktestConfig:
     overlay_ema_spread_norm: float = 0.01
     # MACD histogram score mapping: (pos_rising, pos_falling, neg_falling, neg_rising)
     overlay_macd_scores: tuple[float, float, float, float] = (1.0, 0.6, 0.0, 0.3)
+
+    # Simulate live OMS R normalization bug: use per-strategy URD for
+    # portfolio R sums instead of consistent portfolio base. This makes the
+    # backtest match live's more conservative behavior for impact measurement.
+    simulate_live_r_normalization: bool = False
 
     # Per-strategy per-symbol risk multipliers.
     # Maps "STRATEGY_ID:SYMBOL" -> multiplier that scales base_risk_pct.
@@ -342,9 +348,19 @@ def make_e1_tighter_daily_stops(equity: float) -> UnifiedBacktestConfig:
 def make_optimized_v1(equity: float) -> UnifiedBacktestConfig:
     """Optimized v1: per-asset EMAs (QQQ 10/21, GLD 13/21) + ATRSS risk boost to 1.2%.
 
-    Now the default configuration — this preset is kept for backward compatibility.
+    Pinned to pre-P1 defaults for backward compatibility.
     """
-    return UnifiedBacktestConfig(initial_equity=equity)
+    return UnifiedBacktestConfig(
+        initial_equity=equity,
+        heat_cap_R=2.0,
+        portfolio_daily_stop_R=3.0,
+        atrss=_slot("ATRSS", 0, 0.012, 1.0, 2.0),
+        s5_pb=_slot("S5_PB", 1, 0.008, 1.5, 2.0, mwo=2),
+        s5_dual=_slot("S5_DUAL", 2, 0.008, 1.5, 2.0, mwo=2),
+        breakout=_slot("SWING_BREAKOUT_V3", 3, 0.005, 0.65, 2.0, mwo=2),
+        helix=_slot("AKC_HELIX", 4, 0.005, 0.85, 2.5),
+        breakout_symbols=["QQQ", "GLD"],
+    )
 
 
 def make_multi_overlay(equity: float) -> UnifiedBacktestConfig:
@@ -391,7 +407,108 @@ def make_f1_breakout_expansion(equity: float) -> UnifiedBacktestConfig:
     )
 
 
+def make_live_parity(equity: float) -> UnifiedBacktestConfig:
+    """Live parity: P1 heat-unlock optimized defaults (Mar 14).
+
+    Uses default StrategySlot values:
+      ATRSS(0)  URD 1.8%  max_heat 1.50R  daily_stop 2.0R
+      S5_PB(1)  URD 1.2%  max_heat 1.50R  daily_stop 2.0R
+      S5_DUAL(2) URD 1.2% max_heat 1.50R  daily_stop 2.0R
+      Breakout(3) URD 0.8% max_heat 1.00R daily_stop 2.0R  (+IBIT)
+      Helix(4)  URD 0.8%  max_heat 1.20R  daily_stop 2.5R
+      heat_cap_R=3.0, portfolio_daily_stop_R=4.0
+    """
+    return UnifiedBacktestConfig(initial_equity=equity)
+
+
+def make_live_r_simulation(equity: float) -> UnifiedBacktestConfig:
+    """Simulate live OMS R normalization bug for impact measurement.
+
+    Uses current live_parity defaults with per-strategy URD for portfolio
+    R sums instead of consistent portfolio base.
+    """
+    return UnifiedBacktestConfig(
+        initial_equity=equity,
+        simulate_live_r_normalization=True,
+    )
+
+
+def make_p1_heat_unlock(equity: float) -> UnifiedBacktestConfig:
+    """P1: Heat unlock — now the default configuration (Mar 14).
+
+    Winner of P1-P4 optimization sweep: +54% PnL, Sharpe 1.24→1.52,
+    ratio 72:28→58:42, 952→270 blocked entries. Kept as a named preset
+    for backward compatibility — identical to live_parity/defaults.
+    """
+    return UnifiedBacktestConfig(initial_equity=equity)
+
+
+def make_p2_aggressive_active(equity: float) -> UnifiedBacktestConfig:
+    """P2: Maximum active push — highest risk on proven strategies.
+
+    Pushes active allocation to the limit with aggressive sizing on
+    high-expectancy strategies (ATRSS, S5) and moderate Helix increase.
+    """
+    return UnifiedBacktestConfig(
+        initial_equity=equity,
+        heat_cap_R=3.5,
+        portfolio_daily_stop_R=4.5,
+        atrss=_slot("ATRSS", 0, 0.020, 1.8, 2.0),
+        s5_pb=_slot("S5_PB", 1, 0.015, 2.5, 2.0, mwo=2),
+        s5_dual=_slot("S5_DUAL", 2, 0.015, 2.5, 2.0, mwo=2),
+        breakout=_slot("SWING_BREAKOUT_V3", 3, 0.010, 1.2, 2.0, mwo=2),
+        helix=_slot("AKC_HELIX", 4, 0.006, 1.0, 2.5),
+        breakout_symbols=["QQQ", "GLD", "IBIT"],
+        symbol_risk_multipliers={
+            "ATRSS:QQQ": 1.3,
+            "ATRSS:GLD": 1.3,
+        },
+    )
+
+
+def make_p3_balanced_split(equity: float) -> UnifiedBacktestConfig:
+    """P3: Approach 50:50 from both sides — moderate active boost + overlay reduction.
+
+    Reduces overlay_max_pct to constrain overlay capital while moderately
+    increasing active risk. May reduce total PnL — included as a data point.
+    """
+    return UnifiedBacktestConfig(
+        initial_equity=equity,
+        heat_cap_R=2.5,
+        portfolio_daily_stop_R=3.5,
+        atrss=_slot("ATRSS", 0, 0.015, 1.2, 2.0),
+        s5_pb=_slot("S5_PB", 1, 0.010, 1.5, 2.0, mwo=2),
+        s5_dual=_slot("S5_DUAL", 2, 0.010, 1.5, 2.0, mwo=2),
+        breakout=_slot("SWING_BREAKOUT_V3", 3, 0.007, 0.65, 2.0, mwo=2),
+        helix=_slot("AKC_HELIX", 4, 0.007, 1.0, 2.5),
+        overlay_max_pct=0.65,
+    )
+
+
+def make_p4_multiplier_boost(equity: float) -> UnifiedBacktestConfig:
+    """P4: Symbol risk multipliers + heat unlock — selective high-edge boosts.
+
+    Uses symbol_risk_multipliers to selectively scale risk on proven
+    strategy:symbol pairs instead of blanket increases.
+    """
+    return UnifiedBacktestConfig(
+        initial_equity=equity,
+        heat_cap_R=3.0,
+        portfolio_daily_stop_R=4.0,
+        atrss=_slot("ATRSS", 0, 0.015, 1.5, 2.0),
+        breakout_symbols=["QQQ", "GLD", "IBIT"],
+        symbol_risk_multipliers={
+            "ATRSS:QQQ": 1.5,
+            "ATRSS:GLD": 1.3,
+            "AKC_HELIX:IBIT": 1.4,
+            "AKC_HELIX:GLD": 1.2,
+        },
+    )
+
+
 PRESETS: dict[str, Callable[[float], UnifiedBacktestConfig]] = {
+    "live_parity": make_live_parity,
+    "live_r_simulation": make_live_r_simulation,
     "baseline": make_baseline,
     "a1_atrss_tilt": make_a1_atrss_tilt,
     "a2_equal_alloc": make_a2_equal_alloc,
@@ -403,4 +520,8 @@ PRESETS: dict[str, Callable[[float], UnifiedBacktestConfig]] = {
     "f1_breakout_expansion": make_f1_breakout_expansion,
     "optimized_v1": make_optimized_v1,
     "multi_overlay": make_multi_overlay,
+    "p1_heat_unlock": make_p1_heat_unlock,
+    "p2_aggressive_active": make_p2_aggressive_active,
+    "p3_balanced_split": make_p3_balanced_split,
+    "p4_multiplier_boost": make_p4_multiplier_boost,
 }
