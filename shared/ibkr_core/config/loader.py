@@ -34,6 +34,10 @@ class IBKRConfig:
             if ib_account:
                 overrides["account_id"] = ib_account
             self.profile = self.profile.model_copy(update=overrides)
+        if not self.profile.account_id:
+            raise ValueError(
+                "IB_ACCOUNT_ID env var is required (not set in env or ibkr_profiles.yaml)"
+            )
 
     def _load(self, filename: str, model_cls: type[T]) -> T:
         path = self._config_dir / filename

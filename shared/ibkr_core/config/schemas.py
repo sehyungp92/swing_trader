@@ -7,7 +7,7 @@ class IBKRProfile(BaseModel):
     host: str = "127.0.0.1"
     port: int = 4002  # 4002=paper, 4001=live
     client_id: int = 1
-    account_id: str
+    account_id: str = ""
     is_gateway: bool = True
     readonly: bool = False
     reconnect_max_retries: int = 10
