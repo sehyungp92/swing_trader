@@ -8,13 +8,7 @@ Type=simple
 User=root
 Environment="DISPLAY=:1"
 ExecStartPre=/bin/bash -c '/usr/bin/Xvfb :1 -screen 0 1024x768x24 &'
-ExecStart=/opt/ibc/gatewaystart.sh -inline \
-    --ibc-path /opt/ibc \
-    --ibc-ini /opt/ibc/config/config.ini \
-    --gateway-path /opt/ibgateway \
-    --mode paper \
-    --on2fa:second-factor-device \
-    --tws-settings-path /opt/ibgateway
+ExecStart=/opt/ibc/gatewaystart.sh -inline
 Restart=on-failure
 RestartSec=30
 
