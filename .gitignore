@@ -2,6 +2,7 @@
 .env
 .env.local
 .env.*.local
+config/ibkr_profiles.yaml
 infra/ibc/config.ini
 
 # Python

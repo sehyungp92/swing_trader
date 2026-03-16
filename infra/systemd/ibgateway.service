@@ -14,7 +14,7 @@ ExecStart=/opt/ibc/gatewaystart.sh -inline \
     --gateway-path /opt/ibgateway \
     --mode paper \
     --on2fa:second-factor-device \
-    --tws-settings-path /root/Jts
+    --tws-settings-path /opt/ibgateway
 Restart=on-failure
 RestartSec=30
 
