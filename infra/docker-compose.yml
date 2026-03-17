@@ -122,21 +122,17 @@ services:
       dockerfile: Dockerfile
     container_name: trading_portfolio
     restart: unless-stopped
+    network_mode: host
     command: ["python", "main_multi.py"]
     env_file:
       - ../.env
     environment:
       INSTRUMENTATION_HMAC_SECRET: ${INSTRUMENTATION_HMAC_SECRET:-}
-      RELAY_URL: "http://host.docker.internal:8001/events"
+      RELAY_URL: "http://127.0.0.1:8001/events"
+      IB_HOST: "127.0.0.1"
+      DB_HOST: "127.0.0.1"
     volumes:
       - instrumentation_portfolio:/app/instrumentation/data
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - trading_net
 
 volumes:
   postgres_data:

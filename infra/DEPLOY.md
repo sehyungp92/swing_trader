@@ -49,6 +49,7 @@ sudo timedatectl set-timezone America/New_York
 # Firewall
 sudo ufw allow OpenSSH
 sudo ufw allow 3000/tcp    # Trading dashboard (restrict to your IP later)
+sudo ufw allow from 172.16.0.0/12 to any port 4002  # Docker containers → IB Gateway
 sudo ufw enable
 ```
 
@@ -124,6 +125,10 @@ Port 4002 should be in LISTEN state. If not:
 ```bash
 sudo journalctl -u ibgateway --no-pager -n 50
 ```
+
+### 3g — IB Gateway API Access (TrustedIPs)
+
+IB Gateway defaults to `TrustedIPs=127.0.0.1` and overwrites `jts.ini` on every startup. The portfolio container uses `network_mode: host` to connect from `127.0.0.1`, so no manual configuration is needed.
 
 ## Step 4 — Clone the Repository
 
@@ -230,7 +235,7 @@ docker exec -it trading_postgres psql -U trading_admin -d trading -c \
 ### IB Gateway connectivity from container
 ```bash
 docker exec -it trading_portfolio python -c \
-  "import socket; s = socket.socket(); s.connect(('host.docker.internal', 4002)); print('Connected!'); s.close()"
+  'import socket; s = socket.socket(); s.connect(("127.0.0.1", 4002)); print("Connected!"); s.close()'
 ```
 
 ## Step 9 — Trading Dashboard

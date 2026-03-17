@@ -139,8 +139,9 @@ log "ibgateway service enabled (not started — configure IBC first)"
 log "Configuring firewall..."
 ufw allow OpenSSH
 ufw allow 3000/tcp comment 'Trading dashboard'
+ufw allow from 172.16.0.0/12 to any port 4002 comment 'Docker containers to IB Gateway'
 ufw --force enable
-log "Firewall enabled (SSH + trading dashboard port 3000)"
+log "Firewall enabled (SSH + trading dashboard port 3000 + Docker→IB Gateway)"
 warn "Restrict port 3000 to your IP later: sudo ufw delete allow 3000/tcp && sudo ufw allow from YOUR_IP to any port 3000"
 
 # ── Step 9: Create directories and set permissions ───────────
