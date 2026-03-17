@@ -57,7 +57,6 @@ services:
     env_file:
       - ../.env
     environment:
-      INSTRUMENTATION_HMAC_SECRET: ${INSTRUMENTATION_HMAC_SECRET:-}
       RELAY_URL: "http://host.docker.internal:8001/events"
     volumes:
       - instrumentation_atrss:/app/instrumentation/data
@@ -80,7 +79,6 @@ services:
     env_file:
       - ../.env
     environment:
-      INSTRUMENTATION_HMAC_SECRET: ${INSTRUMENTATION_HMAC_SECRET:-}
       RELAY_URL: "http://host.docker.internal:8001/events"
     volumes:
       - instrumentation_helix:/app/instrumentation/data
@@ -103,7 +101,6 @@ services:
     env_file:
       - ../.env
     environment:
-      INSTRUMENTATION_HMAC_SECRET: ${INSTRUMENTATION_HMAC_SECRET:-}
       RELAY_URL: "http://host.docker.internal:8001/events"
     volumes:
       - instrumentation_breakout:/app/instrumentation/data
@@ -127,7 +124,6 @@ services:
     env_file:
       - ../.env
     environment:
-      INSTRUMENTATION_HMAC_SECRET: ${INSTRUMENTATION_HMAC_SECRET:-}
       RELAY_URL: "http://127.0.0.1:8001/events"
       IB_HOST: "127.0.0.1"
       DB_HOST: "127.0.0.1"
