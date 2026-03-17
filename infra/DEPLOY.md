@@ -195,11 +195,11 @@ docker exec -it trading_postgres psql -U trading_admin -d trading -c \
 
 ```bash
 # Build and start the portfolio launcher
-docker compose -f infra/docker-compose.yml --profile portfolio build keltner
-docker compose -f infra/docker-compose.yml --profile portfolio up -d keltner
+docker compose -f infra/docker-compose.yml --profile portfolio build portfolio
+docker compose -f infra/docker-compose.yml --profile portfolio up -d portfolio
 
 # Verify
-docker compose -f infra/docker-compose.yml --profile portfolio ps keltner
+docker compose -f infra/docker-compose.yml --profile portfolio ps portfolio
 ```
 
 This is the production deployment path that preserves the portfolio heat cap, strategy priorities, and cross-strategy coordination in `main_multi.py`.
@@ -210,13 +210,13 @@ docker compose -f infra/docker-compose.yml --profile atrss up -d atrss          
 docker compose -f infra/docker-compose.yml --profile atrss --profile swing_breakout up -d atrss swing_breakout
 ```
 
-Do not run the standalone strategy profiles alongside `keltner` in production, or you will duplicate trading logic and change portfolio behavior.
+Do not run the standalone strategy profiles alongside `portfolio` in production, or you will duplicate trading logic and change portfolio behavior.
 
 ## Step 8 — Verify
 
 ### Strategy logs
 ```bash
-docker compose -f infra/docker-compose.yml --profile portfolio logs -f keltner
+docker compose -f infra/docker-compose.yml --profile portfolio logs -f portfolio
 ```
 
 You should see: database bootstrap, IB Gateway connection, all five strategy engines starting inside `main_multi.py`, and heartbeat messages.
@@ -229,7 +229,7 @@ docker exec -it trading_postgres psql -U trading_admin -d trading -c \
 
 ### IB Gateway connectivity from container
 ```bash
-docker exec -it trading_keltner python -c \
+docker exec -it trading_portfolio python -c \
   "import socket; s = socket.socket(); s.connect(('host.docker.internal', 4002)); print('Connected!'); s.close()"
 ```
 
@@ -272,12 +272,12 @@ sudo chmod 600 /opt/ibc/config/config.ini
 
 | Action | Command |
 |--------|---------|
-| Restart portfolio launcher | `docker compose -f infra/docker-compose.yml --profile portfolio restart keltner` |
-| Stop portfolio launcher | `docker compose -f infra/docker-compose.yml stop keltner` |
+| Restart portfolio launcher | `docker compose -f infra/docker-compose.yml --profile portfolio restart portfolio` |
+| Stop portfolio launcher | `docker compose -f infra/docker-compose.yml stop portfolio` |
 | Stop everything | `docker compose -f infra/docker-compose.yml down && sudo systemctl stop ibgateway` |
-| Start everything | `sudo systemctl start ibgateway && sleep 60 && docker compose -f infra/docker-compose.yml up -d postgres dashboard && docker compose -f infra/docker-compose.yml --profile portfolio up -d keltner` |
-| View portfolio logs | `docker compose -f infra/docker-compose.yml --profile portfolio logs -f --tail=100 keltner` |
-| Rebuild after code changes | `git pull && docker compose -f infra/docker-compose.yml --profile portfolio build keltner && docker compose -f infra/docker-compose.yml --profile portfolio up -d keltner` |
+| Start everything | `sudo systemctl start ibgateway && sleep 60 && docker compose -f infra/docker-compose.yml up -d postgres dashboard && docker compose -f infra/docker-compose.yml --profile portfolio up -d portfolio` |
+| View portfolio logs | `docker compose -f infra/docker-compose.yml --profile portfolio logs -f --tail=100 portfolio` |
+| Rebuild after code changes | `git pull && docker compose -f infra/docker-compose.yml --profile portfolio build portfolio && docker compose -f infra/docker-compose.yml --profile portfolio up -d portfolio` |
 | Check IB Gateway | `sudo systemctl status ibgateway` / `sudo journalctl -u ibgateway --no-pager -n 30` |
 
 ---

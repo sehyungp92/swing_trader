@@ -115,13 +115,12 @@ services:
     networks:
       - trading_net
 
-  # Legacy service name; this runs the full main_multi.py portfolio launcher.
-  keltner:
-    profiles: ["keltner", "portfolio"]
+  portfolio:
+    profiles: ["portfolio"]
     build:
       context: ..
       dockerfile: Dockerfile
-    container_name: trading_keltner
+    container_name: trading_portfolio
     restart: unless-stopped
     command: ["python", "main_multi.py"]
     env_file:
@@ -130,7 +129,7 @@ services:
       INSTRUMENTATION_HMAC_SECRET: ${INSTRUMENTATION_HMAC_SECRET:-}
       RELAY_URL: "http://host.docker.internal:8001/events"
     volumes:
-      - instrumentation_keltner:/app/instrumentation/data
+      - instrumentation_portfolio:/app/instrumentation/data
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -144,7 +143,7 @@ volumes:
   instrumentation_atrss:
   instrumentation_helix:
   instrumentation_breakout:
-  instrumentation_keltner:
+  instrumentation_portfolio:
 
 networks:
   trading_net:
