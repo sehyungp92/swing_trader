@@ -625,8 +625,8 @@ class HelixEngine:
         new_pivots = scan_pivots(highs, lows, line, hist, atr_arr, bar_times)
 
         # Only add pivots we haven't seen (after last known timestamp)
-        last_h_ts = store.highs[-1].ts if store.highs else datetime.min
-        last_l_ts = store.lows[-1].ts if store.lows else datetime.min
+        last_h_ts = store.highs[-1].ts if store.highs else datetime.min.replace(tzinfo=timezone.utc)
+        last_l_ts = store.lows[-1].ts if store.lows else datetime.min.replace(tzinfo=timezone.utc)
         for p in new_pivots:
             if p.kind.value == "H" and p.ts > last_h_ts:
                 store.add(p)

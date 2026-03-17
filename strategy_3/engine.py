@@ -311,9 +311,9 @@ class BreakoutEngine:
                 if daily_bars:
                     self._init_daily_indicators(sym, daily_bars)
 
-                # Hourly bars (~18mo)
+                # Hourly bars (~2yr)
                 hourly_bars = await self._ib.ib.reqHistoricalDataAsync(
-                    contract, endDateTime="", durationStr="18 M",
+                    contract, endDateTime="", durationStr="2 Y",
                     barSizeSetting="1 hour", whatToShow="TRADES",
                     useRTH=True, formatDate=1,
                 )

@@ -6,3 +6,4 @@ ib_async>=2.1
 asyncpg>=0.31
 pydantic>=2.12
 pyyaml>=6.0
+requests>=2.31
