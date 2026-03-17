@@ -152,6 +152,7 @@ class HelixEngine:
         coordinator: Any = None,
         market_calendar: Any | None = None,
         instrumentation_kit: Any | None = None,
+        equity_offset: float = 0.0,
     ) -> None:
         self._ib = ib_session
         self._oms = oms_service
@@ -159,6 +160,7 @@ class HelixEngine:
         self._config = config
         self._recorder = trade_recorder
         self._equity = equity
+        self._equity_offset = equity_offset
         self._news_calendar: list[tuple[str, datetime]] = news_calendar or []
         self._coordinator = coordinator
         self._market_cal = market_calendar
@@ -412,8 +414,9 @@ class HelixEngine:
                 summary = await self._ib.ib.accountSummaryAsync(account)
                 for item in summary:
                     if item.tag == "NetLiquidation" and item.currency == "USD":
-                        new_equity = float(item.value)
-                        if new_equity > 0:
+                        raw = float(item.value)
+                        if raw > 0:
+                            new_equity = raw + self._equity_offset
                             self._equity = new_equity
                             if self._kit and self._kit.ctx and self._kit.ctx.drawdown_tracker:
                                 self._kit.ctx.drawdown_tracker.update_equity(new_equity)

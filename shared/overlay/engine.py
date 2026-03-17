@@ -58,12 +58,14 @@ class OverlayEngine:
         config: OverlayConfig,
         market_calendar: Any | None = None,
         instrumentation: Any | None = None,
+        equity_offset: float = 0.0,
     ) -> None:
         self._ib = ib_session
         self._equity = equity
         self._config = config
         self._market_cal = market_calendar
         self._instr = instrumentation
+        self._equity_offset = equity_offset  # paper capital offset applied on refresh
 
         # Resolved IB contracts: symbol -> Contract
         self._contracts: dict[str, Any] = {}
@@ -442,14 +444,15 @@ class OverlayEngine:
     # ------------------------------------------------------------------
 
     async def _refresh_equity(self) -> None:
-        """Fetch current account equity from IB."""
+        """Fetch current account equity from IB (applies paper capital offset)."""
         try:
             accounts = self._ib.ib.managedAccounts()
             if accounts:
                 summary = await self._ib.ib.accountSummaryAsync(accounts[0])
                 for item in summary:
                     if item.tag == "NetLiquidation" and item.currency == "USD":
-                        self._equity = float(item.value)
+                        raw = float(item.value)
+                        self._equity = raw + self._equity_offset
                         logger.info("Overlay: equity refreshed — $%.2f", self._equity)
                         return
         except Exception:

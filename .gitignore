@@ -3,6 +3,7 @@
 .env.local
 .env.*.local
 infra/ibc/config.ini
+config/paper_capital_state.json
 
 # Python
 __pycache__/

@@ -126,6 +126,7 @@ class BreakoutEngine:
         news_calendar: list[tuple[str, datetime]] | None = None,
         market_calendar: Any | None = None,
         instrumentation: Any | None = None,
+        equity_offset: float = 0.0,
     ) -> None:
         self._ib = ib_session
         self._oms = oms_service
@@ -133,6 +134,7 @@ class BreakoutEngine:
         self._config = config or SYMBOL_CONFIGS
         self._recorder = trade_recorder
         self._equity = equity
+        self._equity_offset = equity_offset
         self._news_calendar: list[tuple[str, datetime]] = news_calendar or []
         self._market_cal = market_calendar
         self._kit = instrumentation
@@ -2479,7 +2481,8 @@ class BreakoutEngine:
                 summary = await self._ib.ib.accountSummaryAsync(accounts[0])
                 for item in summary:
                     if item.tag == "NetLiquidation" and item.currency == "USD":
-                        self._equity = float(item.value)
+                        raw = float(item.value)
+                        self._equity = raw + self._equity_offset
                         if self._kit and self._kit.ctx and self._kit.ctx.drawdown_tracker:
                             self._kit.ctx.drawdown_tracker.update_equity(self._equity)
                         return

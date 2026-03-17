@@ -8,7 +8,9 @@ are implemented via the shared coordinator.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import signal
 import sys
 from datetime import datetime, timedelta, timezone
@@ -174,17 +176,66 @@ async def main() -> None:
     # 6. Fetch account equity
     # -------------------------------------------------------------------
     equity = 100_000.0  # fallback default
+    actual_net_liq = equity
     try:
         accounts = session.ib.managedAccounts()
         if accounts:
             summary = await session.ib.accountSummaryAsync(accounts[0])
             for item in summary:
                 if item.tag == "NetLiquidation" and item.currency == "USD":
-                    equity = float(item.value)
+                    actual_net_liq = float(item.value)
+                    equity = actual_net_liq
                     logger.info("Account equity from IB: $%.2f", equity)
                     break
     except Exception:
         logger.warning("Could not fetch equity from IB, using default $%.2f", equity)
+
+    # Paper capital: use virtual equity if PAPER_CAPITAL is set.
+    # Virtual equity = PAPER_CAPITAL + (actual_net_liq - baseline).
+    # Baseline is the actual IBKR net liq when paper mode first started,
+    # persisted so that equity grows/shrinks with real P&L across restarts.
+    paper_equity_offset = 0.0
+    _paper_capital_raw = os.environ.get("PAPER_CAPITAL", "")
+    if _paper_capital_raw:
+        _env_mode = os.environ.get("SWING_TRADER_ENV", "").lower()
+        if _env_mode not in ("paper", "dev"):
+            logger.error(
+                "PAPER_CAPITAL is set but SWING_TRADER_ENV=%s (not paper/dev) "
+                "— ignoring to protect live account",
+                _env_mode,
+            )
+        elif float(_paper_capital_raw) <= 0:
+            logger.warning("PAPER_CAPITAL must be > 0 (got %s), ignoring", _paper_capital_raw)
+        else:
+            paper_capital = float(_paper_capital_raw)
+            state_file = config_dir / "paper_capital_state.json"
+            baseline = None
+            if state_file.exists():
+                try:
+                    with open(state_file) as f:
+                        _state = json.load(f)
+                    baseline = _state["baseline_net_liq"]
+                except (json.JSONDecodeError, KeyError, OSError) as e:
+                    logger.warning(
+                        "Corrupt paper_capital_state.json (%s), re-creating baseline", e,
+                    )
+            if baseline is None:
+                baseline = actual_net_liq
+                state_file.write_text(json.dumps({
+                    "baseline_net_liq": baseline,
+                    "paper_capital": paper_capital,
+                }, indent=2))
+                logger.info(
+                    "Paper capital baseline recorded: $%.2f (actual account)",
+                    baseline,
+                )
+            equity = paper_capital + (actual_net_liq - baseline)
+            paper_equity_offset = equity - actual_net_liq
+            logger.info(
+                "Paper capital mode: equity=$%.2f "
+                "(start=$%.2f, actual=$%.2f, baseline=$%.2f, offset=%+.2f)",
+                equity, paper_capital, actual_net_liq, baseline, paper_equity_offset,
+            )
 
     # -------------------------------------------------------------------
     # 6b. Overlay configuration
@@ -308,6 +359,7 @@ async def main() -> None:
         equity=equity,
         market_calendar=market_cal,
         kit=atrss_kit,
+        equity_offset=paper_equity_offset,
     )
 
     helix_engine = HelixEngine(
@@ -320,6 +372,7 @@ async def main() -> None:
         coordinator=coordinator,
         market_calendar=market_cal,
         instrumentation_kit=helix_kit,
+        equity_offset=paper_equity_offset,
     )
 
     breakout_engine = BreakoutEngine(
@@ -331,6 +384,7 @@ async def main() -> None:
         equity=equity,
         market_calendar=market_cal,
         instrumentation=breakout_kit,
+        equity_offset=paper_equity_offset,
     )
 
     s5_pb_engine = KeltnerEngine(
@@ -343,6 +397,7 @@ async def main() -> None:
         equity=equity,
         market_calendar=market_cal,
         kit=s5_pb_kit,
+        equity_offset=paper_equity_offset,
     )
 
     s5_dual_engine = KeltnerEngine(
@@ -355,6 +410,7 @@ async def main() -> None:
         equity=equity,
         market_calendar=market_cal,
         kit=s5_dual_kit,
+        equity_offset=paper_equity_offset,
     )
 
     overlay_engine = OverlayEngine(
@@ -363,6 +419,7 @@ async def main() -> None:
         config=overlay_config,
         market_calendar=market_cal,
         instrumentation=instrumentation_ctx,
+        equity_offset=paper_equity_offset,
     )
 
     # -------------------------------------------------------------------
