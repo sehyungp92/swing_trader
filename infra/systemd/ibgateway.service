@@ -9,7 +9,7 @@ User=root
 Environment="DISPLAY=:1"
 ExecStartPre=/bin/bash -c '/usr/bin/Xvfb :1 -screen 0 1024x768x24 &'
 ExecStart=/opt/ibc/gatewaystart.sh -inline
-Restart=on-failure
+Restart=always
 RestartSec=30
 
 [Install]
