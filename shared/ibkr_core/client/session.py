@@ -1,9 +1,14 @@
 """IBSession - single orchestration entry point for IB interactions."""
+from __future__ import annotations
+
 import asyncio
 import logging
+from typing import Callable
+
 from ib_async import IB
 from ..config.loader import IBKRConfig
 from .connection import ConnectionManager
+from .farm_monitor import FarmMonitor
 from .request_ids import RequestIdAllocator
 from .throttler import Throttler, PacingChannel
 from .heartbeat import HeartbeatMonitor
@@ -27,6 +32,8 @@ class IBSession:
             config.profile.pacing_messages_per_sec,
         )
         self._heartbeat: HeartbeatMonitor | None = None
+        self._farm_monitor: FarmMonitor | None = None
+        self._farm_recovery_callbacks: list[Callable[[str], None]] = []
         self._ready = asyncio.Event()
 
     @property
@@ -51,10 +58,15 @@ class IBSession:
         await self._ids.set_next_valid_id(self._conn.ib.client.getReqId())
         self._heartbeat = HeartbeatMonitor(self._conn.ib)
         await self._heartbeat.start()
+        self._farm_monitor = FarmMonitor(self._conn.ib)
+        self._farm_monitor.on_farm_recovered = self._dispatch_farm_recovery
+        self._farm_monitor.start()
         self._ready.set()
         logger.info("IBSession ready")
 
     async def stop(self) -> None:
+        if self._farm_monitor:
+            self._farm_monitor.stop()
         if self._heartbeat:
             await self._heartbeat.stop()
         await self._conn.disconnect()
@@ -72,6 +84,17 @@ class IBSession:
     async def throttled(self, channel: PacingChannel) -> None:
         """Await pacing token before sending."""
         await self._throttler.acquire(channel)
+
+    def register_farm_recovery_callback(self, cb: Callable[[str], None]) -> None:
+        """Register a callback to be invoked when a data farm recovers."""
+        self._farm_recovery_callbacks.append(cb)
+
+    def _dispatch_farm_recovery(self, farm_name: str) -> None:
+        for cb in self._farm_recovery_callbacks:
+            try:
+                cb(farm_name)
+            except Exception:
+                logger.exception("Farm recovery callback failed")
 
     @property
     def is_congested(self) -> bool:

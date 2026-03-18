@@ -6,6 +6,8 @@ from .throttler import PacingChannel, Throttler
 __all__ = [
     "ConnectionManager",
     "classify_error",
+    "FarmMonitor",
+    "FarmStatus",
     "HeartbeatMonitor",
     "RequestIdAllocator",
     "IBSession",
@@ -18,6 +20,12 @@ def __getattr__(name: str):
     if name == "ConnectionManager":
         from .connection import ConnectionManager
         return ConnectionManager
+    elif name == "FarmMonitor":
+        from .farm_monitor import FarmMonitor
+        return FarmMonitor
+    elif name == "FarmStatus":
+        from .farm_monitor import FarmStatus
+        return FarmStatus
     elif name == "HeartbeatMonitor":
         from .heartbeat import HeartbeatMonitor
         return HeartbeatMonitor

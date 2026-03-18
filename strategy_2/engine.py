@@ -210,6 +210,7 @@ class HelixEngine:
         self._timer_tasks: dict[str, asyncio.Task] = {}
         self._event_queue: asyncio.Queue | None = None
         self._running = False
+        self._resubscribing = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -262,6 +263,9 @@ class HelixEngine:
 
         # Register ticker-update callback as primary trigger detector
         self._ib.ib.pendingTickersEvent += self._on_ticker_update
+
+        # Register farm-recovery handler for automatic market data resubscription
+        self._ib.register_farm_recovery_callback(self._on_farm_recovery)
 
         # Start hourly cycle scheduler
         self._cycle_task = asyncio.create_task(self._hourly_scheduler())
@@ -347,6 +351,58 @@ class HelixEngine:
                         logger.warning("Error cancelling order %s: %s", oid, e)
 
         logger.info("Helix engine stopped")
+
+    # ------------------------------------------------------------------
+    # Farm recovery
+    # ------------------------------------------------------------------
+
+    def _on_farm_recovery(self, farm_name: str) -> None:
+        """Synchronous callback from FarmMonitor — schedule async resubscription."""
+        if not self._running:
+            return
+        logger.info("Farm %s recovered — scheduling market data resubscription", farm_name)
+        asyncio.get_running_loop().call_soon(
+            lambda: asyncio.create_task(self._resubscribe_market_data())
+        )
+
+    async def _resubscribe_market_data(self) -> None:
+        """Cancel and re-request market data for all tracked symbols."""
+        if not self._running:
+            return
+        if self._resubscribing:
+            return
+        self._resubscribing = True
+        try:
+            logger.info("Resubscribing market data for %d symbols", len(self._tickers))
+
+            try:
+                self._ib.ib.pendingTickersEvent -= self._on_ticker_update
+            except Exception:
+                pass
+
+            for sym in list(self._tickers):
+                contract = self._get_contract(sym)
+                if contract:
+                    try:
+                        self._ib.ib.cancelMktData(contract)
+                    except Exception:
+                        pass
+            self._tickers.clear()
+
+            await asyncio.sleep(1.0)
+
+            for sym in self._config:
+                contract = self._get_contract(sym)
+                if contract:
+                    try:
+                        self._tickers[sym] = self._ib.ib.reqMktData(contract, '', False, False)
+                    except Exception as e:
+                        logger.warning("Resubscribe failed for %s: %s", sym, e)
+
+            self._ib.ib.pendingTickersEvent += self._on_ticker_update
+            logger.info("Market data resubscription complete: %d tickers", len(self._tickers))
+        finally:
+            self._resubscribing = False
 
     # ------------------------------------------------------------------
     # Hourly scheduler

@@ -13,6 +13,11 @@ _ERROR_MAP: dict[int, RejectCategory] = {
     202: RejectCategory.UNKNOWN,
     399: RejectCategory.PACING,
     10147: RejectCategory.PACING,
+    # Farm connectivity (reqId=-1, never reach OMS reject logic)
+    2103: RejectCategory.TRANSIENT,  # Market data farm connection is broken
+    2104: RejectCategory.TRANSIENT,  # Market data farm connection is OK
+    2108: RejectCategory.TRANSIENT,  # Market data farm connection is inactive
+    2119: RejectCategory.TRANSIENT,  # Market data farm is connecting
 }
 
 
