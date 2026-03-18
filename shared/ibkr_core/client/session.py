@@ -45,6 +45,8 @@ class IBSession:
         """Connect, receive nextValidId, start heartbeat, mark ready."""
         await self._conn.connect()
         await self._conn.wait_until_ready()
+        # Request live (streaming) market data — must be set before any reqMktData calls
+        self._conn.ib.reqMarketDataType(1)
         # Seed order ID from IB
         await self._ids.set_next_valid_id(self._conn.ib.client.getReqId())
         self._heartbeat = HeartbeatMonitor(self._conn.ib)

@@ -248,6 +248,11 @@ class HelixEngine:
             contract = self._get_contract(sym)
             if contract:
                 try:
+                    qualified = await self._ib.ib.qualifyContractsAsync(contract)
+                    if not qualified:
+                        logger.warning("Could not qualify contract for %s", sym)
+                        continue
+                    contract = qualified[0]
                     self._tickers[sym] = self._ib.ib.reqMktData(contract, '', False, False)
                 except Exception as e:
                     logger.warning("Could not subscribe mkt data for %s: %s", sym, e)
