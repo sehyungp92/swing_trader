@@ -1,8 +1,8 @@
-"""Keltner Momentum Breakout — configuration.
+"""Keltner Channel strategies — configuration.
 
-Strategy uses Keltner Channels + RSI + ROC + Volume for multi-factor entries.
-Three entry modes: breakout, pullback, momentum.
-Instruments: QQQ, GLD, IBIT (ETFs, daily timeframe).
+Keltner Channels + RSI + ROC + Volume for multi-factor entries.
+Active strategies: S5_PB (pullback), S5_DUAL (dual entry).
+Base SYMBOL_CONFIGS retained for backtesting.
 """
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from shared.oms.models.instrument import Instrument
 from shared.oms.models.instrument_registry import InstrumentRegistry
 
-STRATEGY_ID = "KELTNER_MOMENTUM"
 S5_PB_STRATEGY_ID = "S5_PB"
 S5_DUAL_STRATEGY_ID = "S5_DUAL"
 
