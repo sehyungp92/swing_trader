@@ -1,5 +1,5 @@
 'use client';
-import { PortfolioData, HealthData, PORTFOLIO_HEAT_CAP } from '@/lib/types';
+import { PortfolioData, HealthData, SystemPnlSummary, PORTFOLIO_HEAT_CAP, SYSTEM_CONFIG } from '@/lib/types';
 import { fmtR, fmtUSD, toPercent } from '@/lib/formatters';
 import { Progress } from '@/components/ui/progress';
 import { Badge } from '@/components/ui/badge';
@@ -9,9 +9,10 @@ import { cn } from '@/lib/utils';
 interface Props {
   portfolio: PortfolioData | null;
   health: HealthData | null;
+  systemPnl?: SystemPnlSummary[] | null;
 }
 
-export function PortfolioHeader({ portfolio, health }: Props) {
+export function PortfolioHeader({ portfolio, health, systemPnl }: Props) {
   const r = portfolio?.daily_realized_r ?? 0;
   const usd = portfolio?.daily_realized_usd ?? 0;
   const heatR = portfolio?.heat_r ?? 0;
@@ -90,7 +91,7 @@ export function PortfolioHeader({ portfolio, health }: Props) {
       {/* Unrealized sub-line */}
       <div className="flex items-center gap-4 pt-1 border-t border-gray-800">
         <span className="text-xs text-gray-500 font-mono">
-          Unrealized: <span className={portfolio?.unrealized_pnl ?? 0 >= 0 ? 'text-green-500' : 'text-red-500'}>
+          Unrealized: <span className={(portfolio?.unrealized_pnl ?? 0) >= 0 ? 'text-green-500' : 'text-red-500'}>
             {fmtUSD(portfolio?.unrealized_pnl)}
           </span>
         </span>
@@ -98,6 +99,30 @@ export function PortfolioHeader({ portfolio, health }: Props) {
           Open Risk: <span className="text-amber-400">{(portfolio?.portfolio_open_risk_r ?? 0).toFixed(2)}R</span>
         </span>
       </div>
+
+      {/* Per-system P&L badges */}
+      {systemPnl && systemPnl.length > 0 && (
+        <div className="flex items-center gap-3 pt-1">
+          {systemPnl.map(sp => {
+            const sysCfg = SYSTEM_CONFIG[sp.system];
+            return (
+              <span
+                key={sp.system}
+                className={cn(
+                  'inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-mono font-semibold border border-gray-700',
+                  sysCfg.bgColor
+                )}
+              >
+                <span className={cn('w-2 h-2 rounded-full', sysCfg.dotColor)} />
+                <span className={sysCfg.textColor}>{sysCfg.shortLabel}</span>
+                <span className={sp.daily_realized_r >= 0 ? 'text-green-400' : 'text-red-400'}>
+                  {fmtR(sp.daily_realized_r)}
+                </span>
+              </span>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

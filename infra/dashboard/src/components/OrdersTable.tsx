@@ -1,5 +1,5 @@
 'use client';
-import { OrderRow } from '@/lib/types';
+import { OrderRow, getSystemConfig } from '@/lib/types';
 import { fmtAge } from '@/lib/formatters';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
@@ -52,7 +52,12 @@ export function OrdersTable({ orders }: Props) {
                 orders.map(o => (
                   <tr key={o.oms_order_id} className="border-b border-gray-800/50 hover:bg-[#1a1d24]">
                     <td className="px-4 py-2 font-semibold text-gray-100">{o.instrument_symbol}</td>
-                    <td className="px-4 py-2 text-gray-400 truncate max-w-[90px]">{o.strategy_id}</td>
+                    <td className="px-4 py-2 text-gray-400 truncate max-w-[100px]">
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${getSystemConfig(o.strategy_id).dotColor}`} />
+                        {o.strategy_id}
+                      </span>
+                    </td>
                     <td className="px-4 py-2 text-gray-300">{o.role}</td>
                     <td className={cn('px-4 py-2', o.side === 'BUY' ? 'text-green-400' : 'text-red-400')}>
                       {o.side}

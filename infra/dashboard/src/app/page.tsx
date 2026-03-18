@@ -1,6 +1,10 @@
 'use client';
-import { useEffect, useRef, useState } from 'react';
-import { PortfolioData, StrategyData, PositionRow, TradeRow, OrderRow, HealthData, EquityCurvePoint, DailyPnlPoint, EnvData } from '@/lib/types';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  PortfolioData, StrategyData, PositionRow, TradeRow, OrderRow,
+  HealthData, EquityCurvePoint, DailyPnlPoint, EnvData,
+  LiveBatchResponse, ChartBatchResponse, SystemPnlSummary,
+} from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { PortfolioHeader } from '@/components/PortfolioHeader';
 import { StrategyGrid } from '@/components/StrategyGrid';
@@ -11,6 +15,7 @@ import { SystemHealth } from '@/components/SystemHealth';
 import { EquityCurve } from '@/components/EquityCurve';
 import { DailyPnlBars } from '@/components/DailyPnlBars';
 import { RefreshIndicator } from '@/components/RefreshIndicator';
+import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 
 const LIVE_INTERVAL_MS = 30_000;
 const CHART_INTERVAL_MS = 5 * 60_000;
@@ -35,6 +40,8 @@ export default function Dashboard() {
   const [equityCurve, setEquityCurve] = useState<EquityCurvePoint[] | null>(null);
   const [dailyPnl, setDailyPnl] = useState<DailyPnlPoint[] | null>(null);
   const [envData, setEnvData] = useState<EnvData | null>(null);
+  const [systemPnl, setSystemPnl] = useState<SystemPnlSummary[] | null>(null);
+  const [serverTime, setServerTime] = useState<string | null>(null);
 
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
   const [nextRefreshIn, setNextRefreshIn] = useState(LIVE_INTERVAL_MS / 1000);
@@ -45,37 +52,60 @@ export default function Dashboard() {
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const nextLiveRef = useRef<number>(Date.now() + LIVE_INTERVAL_MS);
 
-  async function fetchLive() {
+  const fetchLive = useCallback(async () => {
     setIsRefreshing(true);
-    const [port, strats, pos, trd, ord, hlth] = await Promise.allSettled([
-      fetchJson<PortfolioData>('/api/portfolio'),
-      fetchJson<StrategyData[]>('/api/strategies'),
-      fetchJson<PositionRow[]>('/api/positions'),
-      fetchJson<TradeRow[]>('/api/trades'),
-      fetchJson<OrderRow[]>('/api/orders'),
-      fetchJson<HealthData>('/api/health'),
-    ]);
+    const data = await fetchJson<LiveBatchResponse>('/api/live');
 
-    setPortfolio(port.status === 'fulfilled' && port.value ? port.value : { daily_realized_r: 0, daily_realized_usd: 0, portfolio_open_risk_r: 0, unrealized_pnl: 0, halted: false, halt_reason: null, heat_r: 0 });
-    setStrategies(strats.status === 'fulfilled' && strats.value ? strats.value : []);
-    setPositions(pos.status === 'fulfilled' && pos.value ? pos.value : []);
-    setTrades(trd.status === 'fulfilled' && trd.value ? trd.value : []);
-    setOrders(ord.status === 'fulfilled' && ord.value ? ord.value : []);
-    setHealth(hlth.status === 'fulfilled' && hlth.value ? hlth.value : { strategies: [], adapters: [], halts: [] });
+    if (data) {
+      setPortfolio(data.portfolio);
+      setStrategies(data.strategies);
+      setPositions(data.positions);
+      setTrades(data.trades);
+      setOrders(data.orders);
+      setHealth(data.health);
+      setSystemPnl(data.systemPnl);
+      setServerTime(data.serverTime);
+    } else {
+      // Fallback to defaults on error
+      setPortfolio(p => p ?? { daily_realized_r: 0, daily_realized_usd: 0, portfolio_open_risk_r: 0, unrealized_pnl: 0, halted: false, halt_reason: null, heat_r: 0 });
+      setStrategies(s => s ?? []);
+      setPositions(p => p ?? []);
+      setTrades(t => t ?? []);
+      setOrders(o => o ?? []);
+      setHealth(h => h ?? { strategies: [], adapters: [], halts: [] });
+      setSystemPnl(sp => sp ?? []);
+    }
 
     setLastUpdate(new Date());
     setIsRefreshing(false);
     nextLiveRef.current = Date.now() + LIVE_INTERVAL_MS;
-  }
+  }, []);
 
-  async function fetchCharts() {
-    const [eq, dp] = await Promise.allSettled([
-      fetchJson<EquityCurvePoint[]>('/api/equity-curve'),
-      fetchJson<DailyPnlPoint[]>('/api/daily-pnl'),
-    ]);
-    setEquityCurve(eq.status === 'fulfilled' && eq.value ? eq.value : []);
-    setDailyPnl(dp.status === 'fulfilled' && dp.value ? dp.value : []);
-  }
+  const fetchCharts = useCallback(async () => {
+    const data = await fetchJson<ChartBatchResponse>('/api/charts');
+    if (data) {
+      setEquityCurve(data.equityCurve);
+      setDailyPnl(data.dailyPnl);
+    } else {
+      setEquityCurve(ec => ec ?? []);
+      setDailyPnl(dp => dp ?? []);
+    }
+  }, []);
+
+  // Force refresh for keyboard shortcut
+  const handleForceRefresh = useCallback(() => {
+    fetchLive();
+    fetchCharts();
+  }, [fetchLive, fetchCharts]);
+
+  useKeyboardShortcuts({ onRefresh: handleForceRefresh });
+
+  // Dynamic browser tab title
+  useEffect(() => {
+    const totalR = portfolio?.daily_realized_r ?? 0;
+    const sign = totalR >= 0 ? '+' : '';
+    document.title = `${sign}${totalR.toFixed(2)}R | Trading Monitor`;
+  }, [portfolio?.daily_realized_r]);
 
   useEffect(() => {
     fetchJson<EnvData>('/api/env').then(d => { if (d) setEnvData(d); });
@@ -122,7 +152,7 @@ export default function Dashboard() {
                 ? 'text-amber-300 border-amber-700 bg-amber-950/40'
                 : 'text-gray-500 border-gray-700 bg-gray-900/40'
             )}>
-              {envData.mode === 'live' ? '● LIVE' : envData.mode === 'paper' ? '◆ PAPER' : 'DEV'}
+              {envData.mode === 'live' ? '\u25cf LIVE' : envData.mode === 'paper' ? '\u25c6 PAPER' : 'DEV'}
             </span>
           )}
           {envData?.account_id && (
@@ -130,17 +160,20 @@ export default function Dashboard() {
           )}
         </div>
         <span className="text-xs text-gray-600 font-mono">
-          {new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}
+          {serverTime
+            ? new Date(serverTime).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
+            : new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
+          }
         </span>
       </div>
 
       {/* Portfolio P&L + System Health side by side */}
       <div className="grid xl:grid-cols-2 gap-4">
-        <PortfolioHeader portfolio={portfolio} health={health} />
+        <PortfolioHeader portfolio={portfolio} health={health} systemPnl={systemPnl} />
         <SystemHealth health={health} />
       </div>
 
-      <StrategyGrid strategies={strategies} />
+      <StrategyGrid strategies={strategies} systemPnl={systemPnl} />
 
       {/* Charts left | Tables right */}
       <div className="grid xl:grid-cols-2 gap-4">
@@ -159,6 +192,7 @@ export default function Dashboard() {
         lastUpdate={lastUpdate}
         nextRefreshIn={nextRefreshIn}
         isRefreshing={isRefreshing}
+        serverTime={serverTime}
       />
     </main>
   );

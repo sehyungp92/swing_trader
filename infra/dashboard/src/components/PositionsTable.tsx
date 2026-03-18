@@ -1,5 +1,5 @@
 'use client';
-import { PositionRow } from '@/lib/types';
+import { PositionRow, getSystemConfig } from '@/lib/types';
 import { fmtUSD, fmtAge } from '@/lib/formatters';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
@@ -17,7 +17,7 @@ export function PositionsTable({ positions }: Props) {
       <CardContent className="p-0 flex-1 flex flex-col min-h-0">
         <div className="overflow-x-auto overflow-y-auto flex-1 min-h-0">
           <table className="w-full text-xs font-mono">
-            <thead>
+            <thead className="sticky top-0 bg-[#111318]">
               <tr className="border-b border-gray-800 text-gray-500">
                 <th className="px-4 py-2 text-left">Symbol</th>
                 <th className="px-4 py-2 text-left">Strategy</th>
@@ -48,7 +48,12 @@ export function PositionsTable({ positions }: Props) {
                     )}
                   >
                     <td className="px-4 py-2 font-semibold text-gray-100">{p.instrument_symbol}</td>
-                    <td className="px-4 py-2 text-gray-400">{p.strategy_id}</td>
+                    <td className="px-4 py-2 text-gray-400">
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${getSystemConfig(p.strategy_id).dotColor}`} />
+                        {p.strategy_id}
+                      </span>
+                    </td>
                     <td className="px-4 py-2 text-right text-gray-200">{p.net_qty}</td>
                     <td className="px-4 py-2 text-right text-gray-300">${p.avg_price.toFixed(2)}</td>
                     <td className={cn('px-4 py-2 text-right font-semibold',

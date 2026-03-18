@@ -1,5 +1,5 @@
 'use client';
-import { TradeRow } from '@/lib/types';
+import { TradeRow, getSystemConfig } from '@/lib/types';
 import { fmtR, fmtTime, fmtHoldTime } from '@/lib/formatters';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -66,7 +66,12 @@ export function TradesTable({ trades }: Props) {
                       )}
                     >
                       <td className="px-4 py-2 font-semibold text-gray-100">{t.instrument_symbol}</td>
-                      <td className="px-4 py-2 text-gray-400 truncate max-w-[80px]">{t.strategy_id}</td>
+                      <td className="px-4 py-2 text-gray-400 truncate max-w-[100px]">
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${getSystemConfig(t.strategy_id).dotColor}`} />
+                          {t.strategy_id}
+                        </span>
+                      </td>
                       <td className={cn('px-4 py-2', t.direction === 'LONG' ? 'text-green-400' : 'text-red-400')}>
                         {t.direction}
                       </td>
