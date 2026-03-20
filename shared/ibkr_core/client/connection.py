@@ -12,12 +12,15 @@ logger = logging.getLogger(__name__)
 class ConnectionManager:
     """Manages IB Gateway/TWS connection with exponential backoff reconnect."""
 
+    RECONNECT_COOLDOWN_S = 300  # 5-min mega-backoff between retry cycles
+
     def __init__(self, profile: IBKRProfile):
         self._profile = profile
         self._ib = IB()
         self._connected = asyncio.Event()
         self._shutting_down = False
         self._retry_count = 0
+        self._reconnect_task: Optional[asyncio.Task] = None
         # H5 fix: callback for post-reconnect reconciliation
         self._on_reconnect_callback: Optional[Callable] = None
 
@@ -84,10 +87,13 @@ class ConnectionManager:
         """Callback: IB fires this on socket drop."""
         self._connected.clear()
         if not self._shutting_down:
+            # Guard: don't spawn a second reconnect loop if one is already running
+            if self._reconnect_task and not self._reconnect_task.done():
+                logger.debug("Reconnect already in progress, ignoring duplicate disconnect")
+                return
             logger.warning("Disconnected from IB Gateway, initiating reconnect")
-            # M7 fix: wrap ensure_future with proper exception handling
-            task = asyncio.ensure_future(self._reconnect_loop())
-            task.add_done_callback(self._reconnect_done_callback)
+            self._reconnect_task = asyncio.ensure_future(self._reconnect_loop())
+            self._reconnect_task.add_done_callback(self._reconnect_done_callback)
 
     @staticmethod
     def _reconnect_done_callback(task: asyncio.Task) -> None:
@@ -103,14 +109,29 @@ class ConnectionManager:
             )
 
     async def _reconnect_loop(self) -> None:
-        """Reconnect with exponential backoff."""
-        await self._attempt_connect()
-        # H5 fix: trigger reconciliation after successful reconnection
-        if self._on_reconnect_callback:
+        """Reconnect with exponential backoff. Never gives up unless shutting down."""
+        while not self._shutting_down:
             try:
-                result = self._on_reconnect_callback()
-                if asyncio.iscoroutine(result):
-                    await result
-                logger.info("Post-reconnect callback completed")
+                await self._attempt_connect()
+                # H5 fix: trigger reconciliation after successful reconnection
+                if self._on_reconnect_callback:
+                    try:
+                        result = self._on_reconnect_callback()
+                        if asyncio.iscoroutine(result):
+                            await result
+                        logger.info("Post-reconnect callback completed")
+                    except Exception as e:
+                        logger.error(f"Post-reconnect callback failed: {e}")
+                return  # connected successfully
             except Exception as e:
-                logger.error(f"Post-reconnect callback failed: {e}")
+                if self._shutting_down:
+                    return
+                logger.error(
+                    "Reconnect attempts exhausted (%d retries). "
+                    "Waiting %ds before next cycle. Error: %s",
+                    self._profile.reconnect_max_retries,
+                    self.RECONNECT_COOLDOWN_S,
+                    e,
+                )
+                self._retry_count = 0  # reset for next cycle
+                await asyncio.sleep(self.RECONNECT_COOLDOWN_S)

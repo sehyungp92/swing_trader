@@ -104,8 +104,8 @@ class ExecutionRouter:
             order.broker_order_id, new_qty, new_limit_price, new_stop_price
         )
 
-    async def flatten(self, position: Position) -> None:
-        """Submit a market order to flatten a position."""
+    async def flatten(self, position: Position) -> OMSOrder:
+        """Submit a market order to flatten a position. Returns the created order."""
         from ..models.instrument_registry import InstrumentRegistry
         side = OrderSide.SELL if position.net_qty > 0 else OrderSide.BUY
         qty = abs(int(position.net_qty))
@@ -119,8 +119,11 @@ class ExecutionRouter:
             order_type=OrderType.MARKET,
             role=OrderRole.EXIT,
             status=OrderStatus.RISK_APPROVED,
+            remaining_qty=qty,
+            created_at=datetime.now(timezone.utc),
         )
         await self._submit_to_adapter(order)
+        return order
 
     async def _submit_to_adapter(self, order: OMSOrder) -> None:
         transition(order, OrderStatus.ROUTED)

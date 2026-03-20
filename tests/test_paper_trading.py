@@ -2010,10 +2010,9 @@ class TestErrorHandling:
         assert result["is_misconfiguration"] is False
 
     @pytest.mark.asyncio
-    async def test_timeout_monitor_stuck_routed_transition_invalid(self, repo, bus):
-        """Timeout monitor detects stuck ROUTED but transition to EXPIRED fails
-        because ROUTED->{ACKED, REJECTED, CANCELLED} per state machine.
-        The monitor logs the warning and the order remains ROUTED."""
+    async def test_timeout_monitor_stuck_routed_transitions_to_cancelled(self, repo, bus):
+        """Timeout monitor detects stuck ROUTED and cancels it.
+        ROUTED->{ACKED, REJECTED, CANCELLED} per state machine."""
         order = make_oms_order()
         order.status = OrderStatus.ROUTED
         order.submitted_at = datetime(2020, 1, 1, tzinfo=timezone.utc)  # old
@@ -2024,8 +2023,8 @@ class TestErrorHandling:
         await monitor._scan_stuck_orders()
 
         updated = await repo.get_order(order.oms_order_id)
-        # ROUTED -> EXPIRED is not a valid transition, so order stays ROUTED
-        assert updated.status == OrderStatus.ROUTED
+        # ROUTED -> CANCELLED is valid; stuck orders get cancelled
+        assert updated.status == OrderStatus.CANCELLED
 
     @pytest.mark.asyncio
     async def test_timeout_monitor_expires_stuck_cancel_requested(self, repo, bus):

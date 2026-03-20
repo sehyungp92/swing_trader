@@ -1,7 +1,7 @@
 """Contract resolution and caching."""
 import time
 import logging
-from ib_async import IB, Future, Contract
+from ib_async import IB, Future, Stock, Contract
 from ..config.schemas import ContractTemplate, ExchangeRoute
 from ..models.types import IBContractSpec
 
@@ -27,12 +27,12 @@ class ContractFactory:
         self._cache: dict[tuple[str, str, str], tuple[Contract, IBContractSpec, float]] = {}
         self._cache_ttl_s = 86400  # 24 hours
 
-    async def resolve(self, symbol: str, expiry: str) -> tuple[Contract, IBContractSpec]:
+    async def resolve(self, symbol: str, expiry: str = "") -> tuple[Contract, IBContractSpec]:
         """Resolve a canonical symbol + expiry to a qualified IB Contract.
 
         Args:
-            symbol: root symbol key from contracts.yaml (e.g. "MNQ")
-            expiry: YYYYMM or YYYYMMDD
+            symbol: root symbol key from contracts.yaml (e.g. "MNQ", "QQQ")
+            expiry: YYYYMM or YYYYMMDD (required for FUT, ignored for STK)
 
         Returns:
             (qualified Contract, IBContractSpec with conId and metadata)
@@ -44,19 +44,33 @@ class ContractFactory:
             raise ContractResolutionError(f"Unknown symbol: {symbol}")
 
         tmpl = self._templates[symbol]
-        cache_key = (symbol, expiry, tmpl.exchange)
+        cache_key = (symbol, expiry if tmpl.sec_type == "FUT" else "", tmpl.exchange)
         cached = self._cache.get(cache_key)
         if cached and (time.monotonic() - cached[2]) < self._cache_ttl_s:
             return cached[0], cached[1]
 
-        contract = Future(
-            symbol=tmpl.symbol,
-            exchange=tmpl.exchange,
-            currency=tmpl.currency,
-            lastTradeDateOrContractMonth=expiry,
-        )
-        if tmpl.trading_class:
-            contract.tradingClass = tmpl.trading_class
+        if tmpl.sec_type != "STK" and not expiry:
+            raise ContractResolutionError(
+                f"Expiry required for {tmpl.sec_type} symbol: {symbol}"
+            )
+
+        if tmpl.sec_type == "STK":
+            contract = Stock(
+                symbol=tmpl.symbol,
+                exchange=tmpl.exchange,
+                currency=tmpl.currency,
+            )
+            if tmpl.primary_exchange:
+                contract.primaryExchange = tmpl.primary_exchange
+        else:
+            contract = Future(
+                symbol=tmpl.symbol,
+                exchange=tmpl.exchange,
+                currency=tmpl.currency,
+                lastTradeDateOrContractMonth=expiry,
+            )
+            if tmpl.trading_class:
+                contract.tradingClass = tmpl.trading_class
 
         qualified = await self._ib.qualifyContractsAsync(contract)
         if not qualified:
@@ -72,16 +86,17 @@ class ContractFactory:
             multiplier=float(q.multiplier) if q.multiplier else tmpl.multiplier,
             tick_size=tmpl.tick_size,
             trading_class=q.tradingClass or "",
-            last_trade_date=q.lastTradeDateOrContractMonth,
+            last_trade_date=q.lastTradeDateOrContractMonth or "",
         )
         self._cache[cache_key] = (q, spec, time.monotonic())
         logger.debug(f"Resolved {symbol} {expiry} -> conId={spec.con_id}")
         return q, spec
 
-    def invalidate(self, symbol: str, expiry: str) -> None:
+    def invalidate(self, symbol: str, expiry: str = "") -> None:
         """Force cache eviction (e.g. on rollover)."""
         if symbol in self._templates:
-            cache_key = (symbol, expiry, self._templates[symbol].exchange)
+            tmpl = self._templates[symbol]
+            cache_key = (symbol, expiry if tmpl.sec_type == "FUT" else "", tmpl.exchange)
             self._cache.pop(cache_key, None)
 
     def clear_cache(self) -> None:

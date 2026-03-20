@@ -146,6 +146,61 @@ class TestEventStore:
         assert stats["oldest_pending_age_seconds"] >= 0
         assert stats["db_size_bytes"] > 0
 
+    def test_purge_stale_unacked_deletes_old(self):
+        from datetime import timedelta
+        import sqlite3
+        self.store.insert_events([
+            {"event_id": "stale1", "bot_id": "bot1", "event_type": "trade", "payload": "{}"},
+        ])
+        # Backdate to 10 days ago (no ack — simulates missing consumer)
+        conn = sqlite3.connect(self.db_path)
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+        conn.execute("UPDATE events SET received_at = ? WHERE event_id = 'stale1'", (old_ts,))
+        conn.commit()
+        conn.close()
+        deleted = self.store.purge_stale_unacked(days=3)
+        assert deleted == 1
+        assert self.store.count_pending() == 0
+
+    def test_purge_stale_unacked_keeps_recent(self):
+        self.store.insert_events([
+            {"event_id": "fresh1", "bot_id": "bot1", "event_type": "trade", "payload": "{}"},
+        ])
+        deleted = self.store.purge_stale_unacked(days=3)
+        assert deleted == 0
+        assert self.store.count_pending() == 1
+
+    def test_purge_stale_unacked_ignores_acked(self):
+        from datetime import timedelta
+        import sqlite3
+        self.store.insert_events([
+            {"event_id": "acked1", "bot_id": "bot1", "event_type": "trade", "payload": "{}"},
+        ])
+        self.store.ack_up_to("acked1")
+        conn = sqlite3.connect(self.db_path)
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+        conn.execute("UPDATE events SET received_at = ? WHERE event_id = 'acked1'", (old_ts,))
+        conn.commit()
+        conn.close()
+        deleted = self.store.purge_stale_unacked(days=3)
+        assert deleted == 0
+
+    def test_purge_vacuum_false_skips_vacuum(self):
+        """vacuum=False should still delete but not crash."""
+        from datetime import timedelta
+        import sqlite3
+        self.store.insert_events([
+            {"event_id": "v1", "bot_id": "bot1", "event_type": "trade", "payload": "{}"},
+        ])
+        self.store.ack_up_to("v1")
+        conn = sqlite3.connect(self.db_path)
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        conn.execute("UPDATE events SET received_at = ? WHERE event_id = 'v1'", (old_ts,))
+        conn.commit()
+        conn.close()
+        deleted = self.store.purge_acked(days=7, vacuum=False)
+        assert deleted == 1
+
     def test_filter_by_bot_id(self):
         self.store.insert_events([
             {"event_id": "e1", "bot_id": "bot1", "event_type": "trade", "payload": "{}"},
@@ -361,6 +416,14 @@ class TestRelayAPI:
         assert data["status"] == "ok"
         assert "deleted" in data
 
+    def test_admin_purge_stale_endpoint(self):
+        resp = self.client.post("/admin/purge-stale?days=3")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert "deleted" in data
+        assert data["retention_days"] == 3
+
     def test_ingest_gzip(self):
         """Relay should accept gzip-compressed event batches."""
         import gzip as gzip_mod
@@ -545,6 +608,17 @@ class TestRelayAPIKeyAuth:
     def test_admin_purge_with_valid_key(self):
         resp = self.client.post(
             "/admin/purge?days=7",
+            headers={"X-Api-Key": self.api_key},
+        )
+        assert resp.status_code == 200
+
+    def test_admin_purge_stale_without_key_returns_401(self):
+        resp = self.client.post("/admin/purge-stale?days=3")
+        assert resp.status_code == 401
+
+    def test_admin_purge_stale_with_valid_key(self):
+        resp = self.client.post(
+            "/admin/purge-stale?days=3",
             headers={"X-Api-Key": self.api_key},
         )
         assert resp.status_code == 200

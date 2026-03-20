@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from ..models.intent import Intent, IntentType, IntentReceipt, IntentResult
 from ..models.order import OMSOrder, OrderRole, OrderStatus
+from ..engine.state_machine import transition
 
 if TYPE_CHECKING:
     from ..risk.gateway import RiskGateway
@@ -175,18 +176,34 @@ class IntentHandler:
 
     async def _handle_flatten(self, intent: Intent, intent_id: str) -> IntentReceipt:
         """Flatten positions for a strategy, optionally filtered by instrument."""
+        # 1. Snapshot working orders BEFORE creating flatten exits
+        working = await self._repo.get_working_orders(
+            intent.strategy_id, intent.instrument_symbol
+        )
+
+        # 2. Submit flatten exits
+        flatten_order_ids: list[str] = []
         positions = await self._repo.get_positions(
             intent.strategy_id, intent.instrument_symbol
         )
         for pos in positions:
             if pos.net_qty != 0:
-                await self._router.flatten(pos)
-        # Also cancel all working entry orders for this strategy
-        working = await self._repo.get_working_orders(
-            intent.strategy_id, intent.instrument_symbol
-        )
+                order = await self._router.flatten(pos)
+                if order is not None:
+                    flatten_order_ids.append(order.oms_order_id)
+
+        # 3. Cancel pre-existing working orders only (not the new flatten exits)
         for order in working:
-            order.status = OrderStatus.CANCEL_REQUESTED
-            await self._repo.save_order(order)
-            await self._router.cancel(order)
-        return IntentReceipt(IntentResult.ACCEPTED, intent_id)
+            if transition(order, OrderStatus.CANCEL_REQUESTED):
+                await self._repo.save_order(order)
+                await self._router.cancel(order)
+            elif transition(order, OrderStatus.CANCELLED):
+                # ROUTED/ACKED go directly to CANCELLED
+                order.last_update_at = datetime.now(timezone.utc)
+                await self._repo.save_order(order)
+                await self._router.cancel(order)
+
+        return IntentReceipt(
+            IntentResult.ACCEPTED, intent_id,
+            oms_order_id=flatten_order_ids[0] if flatten_order_ids else None,
+        )

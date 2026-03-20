@@ -1,6 +1,7 @@
 """FastAPI relay application — buffers events from trading bots."""
 from __future__ import annotations
 
+import asyncio
 import gzip
 import json
 import logging
@@ -88,14 +89,34 @@ def create_relay_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # Startup: purge old acked events
+        # Startup: purge old acked + stale unacked events, single VACUUM
         try:
-            purged = store.purge_acked(days=7)
-            if purged:
-                logger.info("Startup purge: removed %d old acked events", purged)
+            purged = store.purge_acked(days=7, vacuum=False)
+            purged_stale = store.purge_stale_unacked(days=3, vacuum=False)
+            if purged or purged_stale:
+                store.vacuum()
+                logger.info(
+                    "Startup purge: removed %d acked, %d stale unacked events",
+                    purged, purged_stale,
+                )
         except Exception as e:
             logger.warning("Startup purge failed: %s", e)
+
+        # Periodic daily purge
+        async def _periodic_purge():
+            while True:
+                await asyncio.sleep(86400)  # 24 hours
+                try:
+                    a = store.purge_acked(days=7, vacuum=False)
+                    s = store.purge_stale_unacked(days=3, vacuum=False)
+                    if a or s:
+                        store.vacuum()
+                except Exception as e:
+                    logger.warning("Periodic purge failed: %s", e)
+
+        task = asyncio.create_task(_periodic_purge())
         yield
+        task.cancel()
 
     app = FastAPI(title="Trading Relay", version="1.0.0", lifespan=lifespan)
     app.add_middleware(GZipMiddleware, minimum_size=500)
@@ -210,6 +231,15 @@ def create_relay_app(
         if denied:
             return denied
         deleted = store.purge_acked(days=days)
+        return {"status": "ok", "deleted": deleted, "retention_days": days}
+
+    @app.post("/admin/purge-stale", response_model=None)
+    async def admin_purge_stale(days: int = 3, x_api_key: str = Header(default="")):
+        """Purge unacked events older than N days."""
+        denied = _check_api_key(x_api_key)
+        if denied:
+            return denied
+        deleted = store.purge_stale_unacked(days=days)
         return {"status": "ok", "deleted": deleted, "retention_days": days}
 
     return app

@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS orders (
     reprice_count INT DEFAULT 0,
     entry_policy JSONB,
     risk_context JSONB,
-    rejection_reason TEXT,
+    reject_reason TEXT DEFAULT '',
+    retry_count INT DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     submitted_at TIMESTAMPTZ,
     acked_at TIMESTAMPTZ,
@@ -406,6 +407,23 @@ BEGIN
         ON CONFLICT (trade_date, strategy_id) DO NOTHING;
 
         DROP TABLE IF EXISTS risk_daily;
+    END IF;
+END $$;
+
+
+-- ============================================================
+-- MIGRATION: orders table column alignment
+-- ============================================================
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_name='orders' AND column_name='rejection_reason') THEN
+        ALTER TABLE orders RENAME COLUMN rejection_reason TO reject_reason;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='orders' AND column_name='retry_count') THEN
+        ALTER TABLE orders ADD COLUMN retry_count INT DEFAULT 0;
     END IF;
 END $$;
 """

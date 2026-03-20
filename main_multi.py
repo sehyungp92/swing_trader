@@ -338,6 +338,10 @@ async def main() -> None:
     await oms.start()
     logger.info("Multi-strategy OMS started")
 
+    # Wire post-reconnect OMS reconciliation
+    session.set_reconnect_callback(oms._reconciler.on_reconnect_reconciliation)
+    logger.info("Post-reconnect reconciliation callback wired")
+
     # Start instrumentation sidecar (background thread)
     if instrumentation_ctx is not None:
         try:

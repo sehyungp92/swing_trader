@@ -96,6 +96,10 @@ class IBSession:
             except Exception:
                 logger.exception("Farm recovery callback failed")
 
+    def set_reconnect_callback(self, callback: Callable) -> None:
+        """Register a callback to invoke after successful reconnection."""
+        self._conn.set_reconnect_callback(callback)
+
     @property
     def is_congested(self) -> bool:
         return self._throttler.is_congested

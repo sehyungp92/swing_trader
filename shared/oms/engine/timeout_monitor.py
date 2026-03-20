@@ -88,13 +88,13 @@ class OrderTimeoutMonitor:
                 if ref_time and (now - ref_time).total_seconds() > self._routed_timeout_s:
                     logger.warning(
                         f"Order {order.oms_order_id} stuck in ROUTED for "
-                        f">{self._routed_timeout_s}s — expiring"
+                        f">{self._routed_timeout_s}s — cancelling"
                     )
-                    if transition(order, OrderStatus.EXPIRED):
+                    if transition(order, OrderStatus.CANCELLED):
                         order.last_update_at = now
                         await self._repo.save_order(order)
                         await self._repo.save_event(
-                            order.oms_order_id, "TIMEOUT_EXPIRED",
+                            order.oms_order_id, "TIMEOUT_CANCELLED",
                             {"reason": "routed_timeout", "timeout_s": self._routed_timeout_s},
                         )
                         self._bus.emit_order_event(order)

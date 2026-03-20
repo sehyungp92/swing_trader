@@ -1,7 +1,7 @@
 """In-memory repository for development and testing."""
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from ..models.fill import Fill
@@ -42,7 +42,7 @@ class InMemoryRepository:
             "oms_order_id": oms_order_id,
             "event_type": event_type,
             "payload": payload,
-            "timestamp": datetime.utcnow(),
+            "timestamp": datetime.now(timezone.utc),
         })
 
     async def save_fill(self, fill: Fill) -> None:

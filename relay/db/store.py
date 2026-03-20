@@ -168,8 +168,16 @@ class EventStore:
         finally:
             conn.close()
 
-    def purge_acked(self, days: int = 7) -> int:
-        """Delete acked events older than N days, then VACUUM."""
+    def vacuum(self) -> None:
+        """Reclaim disk space after bulk deletes."""
+        conn = self._connect()
+        try:
+            conn.execute("VACUUM")
+        finally:
+            conn.close()
+
+    def purge_acked(self, days: int = 7, vacuum: bool = True) -> int:
+        """Delete acked events older than N days."""
         conn = self._connect()
         try:
             cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
@@ -180,8 +188,28 @@ class EventStore:
             deleted = cursor.rowcount
             conn.commit()
             if deleted > 0:
-                conn.execute("VACUUM")
+                if vacuum:
+                    conn.execute("VACUUM")
                 logger.info("Purged %d acked events older than %d days", deleted, days)
+            return deleted
+        finally:
+            conn.close()
+
+    def purge_stale_unacked(self, days: int = 3, vacuum: bool = True) -> int:
+        """Delete unacked events older than N days (no consumer draining them)."""
+        conn = self._connect()
+        try:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+            cursor = conn.execute(
+                "DELETE FROM events WHERE acked = 0 AND received_at < ?",
+                (cutoff,),
+            )
+            deleted = cursor.rowcount
+            conn.commit()
+            if deleted > 0:
+                if vacuum:
+                    conn.execute("VACUUM")
+                logger.info("Purged %d stale unacked events older than %d days", deleted, days)
             return deleted
         finally:
             conn.close()
